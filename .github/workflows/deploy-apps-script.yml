@@ -1,0 +1,38 @@
+name: Deploy Apps Script
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps-script/**"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install clasp
+        run: npm install -g @google/clasp@2.4.2
+      - name: Log in to Google
+        env:
+          CLASPRC: ${{ secrets.CLASPRC_JSON }}
+        run: printf "%s" "$CLASPRC" > ~/.clasprc.json
+      - name: Push changed projects
+        run: |
+          for dir in apps-script/*/; do
+            [ -f "$dir/.clasp.json" ] || { echo "skip $dir"; continue; }
+            changed=$(git diff --name-only HEAD^ HEAD -- "$dir" || true)
+            if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -z "$changed" ]; then
+              echo "skip $dir (no changes)"; continue
+            fi
+            echo "=== Pushing $dir ==="
+            (cd "$dir" && clasp push -f)
+            if [ -f "$dir/DEPLOYMENT_ID" ]; then
+              (cd "$dir" && clasp deploy -i "$(tr -d "[:space:]" < DEPLOYMENT_ID)" -d "GitHub $(git rev-parse --short HEAD)")
+            fi
+          done

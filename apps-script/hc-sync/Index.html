@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>HC Sync</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: 'Google Sans', Arial, sans-serif;
+      font-size: 14px;
+      background: #f8f9fa;
+      margin: 0;
+      padding: 32px 16px 64px;
+      color: #202124;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.08);
+      max-width: 540px;
+      margin: 0 auto;
+      padding: 32px 36px 36px;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 500;
+      color: #1a73e8;
+      margin: 0 0 4px;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #80868b;
+      margin: 0 0 28px;
+    }
+
+    /* ── Mode radio group ── */
+    .mode-group {
+      display: flex;
+      gap: 0;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .mode-option {
+      flex: 1;
+      position: relative;
+    }
+    .mode-option input[type="radio"] {
+      position: absolute;
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .mode-option label {
+      display: block;
+      text-align: center;
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      color: #5f6368;
+      cursor: pointer;
+      border-right: 1px solid #dadce0;
+      transition: background .15s, color .15s;
+      user-select: none;
+    }
+    .mode-option:last-child label { border-right: none; }
+    .mode-option input:checked + label {
+      background: #e8f0fe;
+      color: #1a73e8;
+    }
+    .mode-option label:hover { background: #f1f3f4; }
+
+    .mode-hint {
+      font-size: 12px;
+      color: #80868b;
+      margin: 0 0 20px;
+      min-height: 16px;
+    }
+
+    /* ── Form fields ── */
+    .field { margin-bottom: 18px; }
+
+    .field label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #5f6368;
+      margin-bottom: 5px;
+      letter-spacing: .01em;
+    }
+
+    .field input[type="text"],
+    .field select {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 14px;
+      color: #202124;
+      background: #fff;
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    .field select {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235f6368'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 32px;
+    }
+    .field input:focus,
+    .field select:focus {
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 2px rgba(26,115,232,.18);
+    }
+    .field input.invalid,
+    .field select.invalid {
+      border-color: #c5221f;
+      box-shadow: 0 0 0 2px rgba(197,34,31,.18);
+    }
+    .field .hint {
+      font-size: 12px;
+      color: #80868b;
+      margin-top: 4px;
+    }
+    .field .field-error {
+      font-size: 12px;
+      color: #c5221f;
+      margin-top: 4px;
+      display: none;
+    }
+    .field .field-error.visible { display: block; }
+
+    /* Old URL field wrapper — hidden when Create is selected */
+    #old-url-field { transition: opacity .2s; }
+    #old-url-field.hidden { display: none; }
+
+    /* ── Submit button ── */
+    #submit-btn {
+      width: 100%;
+      padding: 11px;
+      background: #1a73e8;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: .01em;
+      cursor: pointer;
+      margin-top: 6px;
+      transition: background .15s;
+    }
+    #submit-btn:hover:not(:disabled) { background: #1558b0; }
+    #submit-btn:disabled { background: #bdc1c6; cursor: not-allowed; }
+
+    /* ── Status / result area ── */
+    #status { margin-top: 20px; display: none; }
+
+    .status-box {
+      padding: 14px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .status-box.loading { background: #e8f0fe; color: #174ea6; }
+    .status-box.success { background: #e6f4ea; color: #137333; }
+    .status-box.error   { background: #fce8e6; color: #c5221f; }
+
+    .status-box strong { font-weight: 600; }
+    .status-box a { color: inherit; font-weight: 600; text-decoration: underline; }
+    .status-box a:hover { opacity: .8; }
+
+    .status-box .warnings {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(0,0,0,.08);
+      font-size: 12px;
+      color: #7c5800;
+    }
+    .status-box .warnings li { margin: 2px 0; }
+
+    .switch-btn {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 6px 14px;
+      background: #c5221f;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .switch-btn:hover { background: #a50e0e; }
+  </style>
+</head>
+<body>
+<div class="card">
+
+  <h1>HC Sync</h1>
+  <p class="subtitle">Update an existing Google Doc with the latest content from the Help Center.</p>
+
+  <!-- Mode selector -->
+  <div class="mode-group">
+    <div class="mode-option">
+      <input type="radio" id="mode-update" name="mode" value="update" checked>
+      <label for="mode-update">Update existing Doc</label>
+    </div>
+    <div class="mode-option">
+      <input type="radio" id="mode-create" name="mode" value="create">
+      <label for="mode-create">Create new Doc</label>
+    </div>
+  </div>
+  <p class="mode-hint" id="mode-hint">Refresh an article that already has a Doc in the drive.</p>
+
+  <!-- Help Center URL -->
+  <div class="field">
+    <label for="url">Help Center URL</label>
+    <input type="text" id="url" placeholder="https://help.thumbtack.com/article/…" autocomplete="off" spellcheck="false">
+    <p class="hint">Paste the full URL of the article you want to refresh.</p>
+    <p class="field-error" id="url-error"></p>
+  </div>
+
+  <!-- Publish date -->
+  <div class="field">
+    <label for="publishDate">Publish date</label>
+    <input type="text" id="publishDate" placeholder="May 19, 2026" autocomplete="off">
+    <p class="hint">Format: Month Day, Year (e.g. May 16, 2026). Defaults to today.</p>
+  </div>
+
+  <!-- Reviewer -->
+  <div class="field">
+    <label for="reviewer">Reviewer</label>
+    <select id="reviewer">
+      <option value="" disabled selected>Select a reviewer…</option>
+    </select>
+    <p class="field-error" id="reviewer-error"></p>
+  </div>
+
+  <!-- Old URL (shown only in Update mode) -->
+  <div class="field" id="old-url-field">
+    <label for="oldUrl">Old URL <span style="font-weight:400;color:#80868b;">(if article URL changed in Contentful)</span></label>
+    <input type="text" id="oldUrl" placeholder="https://help.thumbtack.com/article/old-slug" autocomplete="off" spellcheck="false">
+    <p class="hint">Leave blank unless the Contentful slug changed since the Doc was created.</p>
+    <p class="field-error" id="oldUrl-error"></p>
+  </div>
+
+  <button id="submit-btn" onclick="submitForm()">Refresh article</button>
+
+  <!-- Result -->
+  <div id="status"></div>
+
+</div><!-- .card -->
+
+<script>
+  // ── Boot: populate reviewer dropdown and today's date ──────────────────
+
+  google.script.run
+    .withSuccessHandler(function(reviewers) {
+      var sel = document.getElementById('reviewer');
+      reviewers.forEach(function(name) {
+        var opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      });
+    })
+    .withFailureHandler(function() {})
+    .getKnownReviewers();
+
+  google.script.run
+    .withSuccessHandler(function(today) {
+      document.getElementById('publishDate').value = today;
+    })
+    .withFailureHandler(function() {})
+    .getTodayDate();
+
+  // ── Mode switching ──────────────────────────────────────────────────────
+
+  var HINTS = {
+    update: 'Refresh an article that already has a Doc in the drive.',
+    create: 'Create a brand-new Doc for an article that doesn\'t have one yet.',
+  };
+
+  document.querySelectorAll('input[name="mode"]').forEach(function(radio) {
+    radio.addEventListener('change', function() {
+      onModeChange(this.value);
+    });
+  });
+
+  function onModeChange(mode) {
+    document.getElementById('mode-hint').textContent = HINTS[mode];
+    document.getElementById('old-url-field').classList.toggle('hidden', mode === 'create');
+    document.getElementById('submit-btn').textContent =
+      mode === 'create' ? 'Create new Doc' : 'Refresh article';
+    clearStatus();
+  }
+
+  function getMode() {
+    return document.querySelector('input[name="mode"]:checked').value;
+  }
+
+  // ── URL VALIDATION ──────────────────────────────────────────────────────
+  // Accepts ONLY URLs in the form:
+  //   https://help.thumbtack.com/article/<slug>
+  //   http://help.thumbtack.com/article/<slug>
+  // The slug must be non-empty and may contain letters, numbers, hyphens,
+  // and underscores. Trailing slash is allowed. Query strings and fragments
+  // are tolerated (they get stripped later).
+
+  var HC_URL_REGEX = /^https?:\/\/help\.thumbtack\.com\/article\/[A-Za-z0-9_-]+\/?(\?.*)?(#.*)?$/;
+
+  function validateHcUrl(url) {
+    if (!url) return { ok: false, error: 'URL is required.' };
+    if (!/^https?:\/\//i.test(url)) {
+      return { ok: false, error: 'URL must start with https://' };
+    }
+    if (!/help\.thumbtack\.com/i.test(url)) {
+      return { ok: false, error: 'URL must be from help.thumbtack.com' };
+    }
+    if (!/\/article\//i.test(url)) {
+      return { ok: false, error: 'URL must include /article/ in the path.' };
+    }
+    if (!HC_URL_REGEX.test(url)) {
+      return { ok: false, error: 'Invalid URL format. Expected: https://help.thumbtack.com/article/your-slug' };
+    }
+    return { ok: true };
+  }
+
+  // Real-time validation as the user types in the URL field
+  document.getElementById('url').addEventListener('input', function() {
+    var v = this.value.trim();
+    if (!v) { clearFieldError('url'); return; }
+    var check = validateHcUrl(v);
+    if (check.ok) {
+      clearFieldError('url');
+    } else {
+      showFieldError('url', check.error);
+    }
+  });
+
+  document.getElementById('oldUrl').addEventListener('input', function() {
+    var v = this.value.trim();
+    if (!v) { clearFieldError('oldUrl'); return; }
+    var check = validateHcUrl(v);
+    if (check.ok) {
+      clearFieldError('oldUrl');
+    } else {
+      showFieldError('oldUrl', check.error);
+    }
+  });
+
+  function showFieldError(fieldId, msg) {
+    document.getElementById(fieldId).classList.add('invalid');
+    var errEl = document.getElementById(fieldId + '-error');
+    if (errEl) {
+      errEl.textContent = msg;
+      errEl.classList.add('visible');
+    }
+  }
+
+  function clearFieldError(fieldId) {
+    document.getElementById(fieldId).classList.remove('invalid');
+    var errEl = document.getElementById(fieldId + '-error');
+    if (errEl) {
+      errEl.textContent = '';
+      errEl.classList.remove('visible');
+    }
+  }
+
+  function clearAllFieldErrors() {
+    ['url', 'oldUrl', 'reviewer'].forEach(clearFieldError);
+  }
+
+  // ── Form submission ─────────────────────────────────────────────────────
+
+  function submitForm() {
+    clearAllFieldErrors();
+
+    var url         = document.getElementById('url').value.trim();
+    var mode        = getMode();
+    var reviewer    = document.getElementById('reviewer').value;
+    var publishDate = document.getElementById('publishDate').value.trim();
+    var oldUrl      = document.getElementById('oldUrl').value.trim();
+
+    // Validate URL
+    var urlCheck = validateHcUrl(url);
+    if (!urlCheck.ok) {
+      showFieldError('url', urlCheck.error);
+      document.getElementById('url').focus();
+      return;
+    }
+
+    // Validate Old URL (only if provided)
+    if (oldUrl) {
+      var oldCheck = validateHcUrl(oldUrl);
+      if (!oldCheck.ok) {
+        showFieldError('oldUrl', oldCheck.error);
+        document.getElementById('oldUrl').focus();
+        return;
+      }
+    }
+
+    // Validate reviewer
+    if (!reviewer) {
+      showFieldError('reviewer', 'Please select a reviewer.');
+      document.getElementById('reviewer').focus();
+      return;
+    }
+
+    setLoading(true);
+
+    google.script.run
+      .withSuccessHandler(onSuccess)
+      .withFailureHandler(onError)
+      .refreshArticle({ url: url, mode: mode, reviewer: reviewer, publishDate: publishDate, oldUrl: oldUrl });
+  }
+
+  // ── Success handler ─────────────────────────────────────────────────────
+
+  function onSuccess(result) {
+    setLoading(false);
+    var verb = result.mode === 'create' ? 'created' : 'updated';
+    var html = '✓ Doc ' + verb + ' — <strong>' + esc(result.docFilename) + '</strong>. ' +
+               '<a href="' + esc(result.docUrl) + '" target="_blank">Open Doc →</a>';
+
+    if (result.issues && result.issues.length > 0) {
+      html += '<div class="warnings"><strong>Warnings:</strong><ul>' +
+        result.issues.map(function(w) { return '<li>' + esc(w) + '</li>'; }).join('') +
+        '</ul></div>';
+    }
+
+    showResult('success', html);
+  }
+
+  // ── Error handler ───────────────────────────────────────────────────────
+
+  function onError(err) {
+    setLoading(false);
+    var msg = err.message || String(err);
+
+    // Try to parse structured error codes
+    try {
+      var parsed = JSON.parse(msg);
+      if (parsed.code === 'DOC_NOT_FOUND') {
+        handleDocNotFound(parsed);
+        return;
+      }
+      if (parsed.code === 'ALREADY_EXISTS') {
+        handleAlreadyExists(parsed);
+        return;
+      }
+      // Unknown structured error
+      showError(parsed.message || msg);
+    } catch (e) {
+      // Plain string error
+      showError(msg);
+    }
+  }
+
+  function handleDocNotFound(parsed) {
+    var currentUrl = document.getElementById('url').value.trim();
+    var html = '✗ ' + esc(parsed.message) +
+      '<br><button class="switch-btn" onclick="switchToCreate(' + JSON.stringify(currentUrl) + ')">Switch to Create mode</button>';
+    showResult('error', html);
+  }
+
+  function handleAlreadyExists(parsed) {
+    var currentUrl = document.getElementById('url').value.trim();
+    var html = '✗ ' + esc(parsed.message);
+    if (parsed.existingDocUrl) {
+      html += '  <a href="' + esc(parsed.existingDocUrl) + '" target="_blank">Open existing Doc →</a>';
+    }
+    html += '<br><button class="switch-btn" onclick="switchToUpdate(' + JSON.stringify(currentUrl) + ')">Switch to Update mode</button>';
+    showResult('error', html);
+  }
+
+  // ── Mode-switch helpers (called from inline onclick) ────────────────────
+
+  function switchToCreate(url) {
+    document.getElementById('mode-create').checked = true;
+    onModeChange('create');
+    if (url) document.getElementById('url').value = url;
+    clearStatus();
+  }
+
+  function switchToUpdate(url) {
+    document.getElementById('mode-update').checked = true;
+    onModeChange('update');
+    if (url) document.getElementById('url').value = url;
+    clearStatus();
+  }
+
+  // ── UI helpers ──────────────────────────────────────────────────────────
+
+  function setLoading(on) {
+    var btn = document.getElementById('submit-btn');
+    btn.disabled = on;
+    if (on) {
+      var mode = getMode();
+      showResult('loading',
+        mode === 'create'
+          ? 'Fetching from Contentful and creating Google Doc…'
+          : 'Fetching from Contentful and updating Google Doc…'
+      );
+    }
+  }
+
+  function showError(msg) {
+    showResult('error', '✗ ' + esc(msg));
+  }
+
+  function showResult(type, html) {
+    var statusEl = document.getElementById('status');
+    statusEl.style.display = 'block';
+    statusEl.innerHTML = '<div class="status-box ' + type + '">' + html + '</div>';
+  }
+
+  function clearStatus() {
+    var statusEl = document.getElementById('status');
+    statusEl.style.display = 'none';
+    statusEl.innerHTML = '';
+  }
+
+  function esc(text) {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>
