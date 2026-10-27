@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.8.0
+// @version      2.8.1
 // @updateURL    https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, plus Update from Doc. Admin mode (Tampermonkey menu) adds batch refresh, the weekly audit, weekly report and Fix from audit. One script for the whole team.
@@ -95,7 +95,7 @@
  *   Salesforce (LastModifiedBy), shown in Fix from audit and the email.
  *
  * v2.8.0 - ONE script for everyone, installed from content-index-tools (auto-updates).
- *   Writers see Update, + New and Update from Doc. Tampermonkey menu -> "Admin mode"
+ *   Writers see Update and + New (2.8.1: Update from Doc is admin-only while in testing). Tampermonkey menu -> "Admin mode"
  *   adds the batch, audit, weekly report and Fix from audit buttons. Works with the
  *   team key out of the box; "Change sync key" still lets you save your own.
  *
@@ -117,7 +117,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.8.0';
+  const SCRIPT_VERSION = '2.8.1';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -1559,9 +1559,9 @@
       '<button class="kar-main-btn" id="kar-nodate-btn" title="Re-sync only the KAs whose Doc has no Salesforce date (Not saved in the dashboard)">\u27F3 Refresh missing dates</button>' +
       '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>' +
       '<button class="kar-main-btn" id="kar-weekly-btn">\uD83D\uDCC5 Weekly report</button>' +
-      '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>'
-      ) : '') +
-      '<button class="kar-main-btn" id="kar-ufd-btn">\u270E Update from Doc</button>';
+      '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>' +
+      '<button class="kar-main-btn" id="kar-ufd-btn">\u270E Update from Doc</button>'
+      ) : '');
     document.body.appendChild(bar);
     const overlay = document.createElement('div');
     overlay.id = 'kar-overlay';
@@ -1569,7 +1569,7 @@
     document.body.appendChild(overlay);
     document.getElementById('kar-update-btn').addEventListener('click', () => runIntent('update'));
     document.getElementById('kar-new-btn').addEventListener('click', () => runIntent('new'));
-    document.getElementById('kar-ufd-btn').addEventListener('click', () => UFD.run());
+    if (document.getElementById('kar-ufd-btn')) document.getElementById('kar-ufd-btn').addEventListener('click', () => UFD.run());
     if (document.getElementById('kar-batch-btn')) document.getElementById('kar-batch-btn').addEventListener('click', () => startBatch(0));
     if (document.getElementById('kar-outdated-btn')) document.getElementById('kar-outdated-btn').addEventListener('click', () => startBatch(0, 'outdated'));
     if (document.getElementById('kar-nodate-btn')) document.getElementById('kar-nodate-btn').addEventListener('click', () => startBatch(0, 'nodate'));
