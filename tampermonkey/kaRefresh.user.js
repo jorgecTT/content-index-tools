@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.8.1
+// @version      2.8.2
 // @updateURL    https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, plus Update from Doc. Admin mode (Tampermonkey menu) adds batch refresh, the weekly audit, weekly report and Fix from audit. One script for the whole team.
@@ -41,6 +41,8 @@
  *   no Salesforce date. On layouts with no Last Modified By, Update and the
  *   batches open the Versions tab to read who made the version, then go back.
  *
+ * v2.8.2 - The Audit window also counts "Doc missing gray KA info" (NO_HEADER,
+ *   from KA Sync 2.9.6).
  * v2.7.5 - KAs whose layout has no Last Modified fields (Trust & Safety) now
  *   save the Last Published Date, and who made the viewed version (Versions
  *   tab), instead of "Not listed".
@@ -117,7 +119,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.8.1';
+  const SCRIPT_VERSION = '2.8.2';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -2499,6 +2501,7 @@
 
   const AUDIT_LABELS = [
     ['MISSING_DOC', 'In Salesforce, no Doc'], ['ARCHIVED_BUT_ACTIVE', 'Archived by mistake'], ['EMPTY_DOC', 'Doc is empty'],
+    ['NO_HEADER', 'Doc missing gray KA info'],
     ['DUPLICATE_DOCS', 'Duplicate Docs'], ['OUTDATED', 'Outdated'], ['WRONG_TEAM', 'Different team'],
     ['EXTRA_DOC', 'Extra Doc (not in reports)'], ['NO_META', 'Doc without KA data'], ['OK', 'OK'],
   ];
