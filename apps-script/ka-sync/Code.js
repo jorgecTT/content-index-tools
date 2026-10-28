@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.9.5)
+ * KA Sync v2 — Google Apps Script backend (v2.9.6)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,16 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.6
+ *   - audit: NEW status NO_HEADER ("Doc missing gray KA info"): the Doc has no
+ *     page header. It shows in the ka_audit tab and the audit email.
+ *     Where it comes from: (1) a sync that could not write the header says
+ *     "no header" in the Doc's refresh log, and (2) a daily check opens every
+ *     KA Doc and saves the list of Docs without a header.
+ *   - NEW installHeaderCheckTrigger(): Run it ONCE in the editor. It sets the
+ *     daily check (dailyHeaderCheck, around 3 AM Pacific).
+ *   - checkKaHeaders() also saves its list, so the next audit uses it.
  *
  * v2.9.5
  *   - The page header is now CHECKED after it is written: the Doc is opened
@@ -559,30 +569,84 @@ function _kaDocsInFolder() {
   return out;
 }
 
-/**
- * Logs, per team, how many KA Docs have the page header, and lists the ones
- * that don't (with the error, if the Doc couldn't be opened). Changes nothing.
- */
-function checkKaHeaders() {
+// Opens every KA Doc and lists the ones without the page header.
+function _scanKaHeaders(budgetMs) {
   var t0 = Date.now();
   var stats = {}, missing = [], skipped = 0;
   var files = _kaDocsInFolder();
   for (var i = 0; i < files.length; i++) {
-    if (Date.now() - t0 > 300000) { skipped = files.length - i; break; }
+    if (Date.now() - t0 > budgetMs) { skipped = files.length - i; break; }
     var f = files[i];
     var team = inferAudience(f.getName()) || 'other';
     stats[team] = stats[team] || { ok: 0, missing: 0 };
     var h = _headerTextOf(f.getId());
     if (h.text && h.text.indexOf('Published link:') !== -1) { stats[team].ok++; continue; }
     stats[team].missing++;
-    missing.push('[' + team + '] ' + f.getName() + (h.error ? '  (error: ' + h.error + ')' : '') + '\n    ' + f.getUrl());
+    missing.push({ id: f.getId(), name: f.getName(), team: team, url: f.getUrl(), error: h.error || '' });
   }
+  return { stats: stats, missing: missing, skipped: skipped };
+}
+
+// The list the audit reads. Only Doc ids are kept (Script Properties are small).
+var NO_HEADER_PROP = 'KA_NO_HEADER_IDS';
+function _saveNoHeaderIds(scan) {
+  var ids = scan.missing.map(function (m) { return m.id; }).slice(0, 150);
+  PropertiesService.getScriptProperties().setProperty(NO_HEADER_PROP, JSON.stringify({
+    checkedAt: Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm'),
+    complete: !scan.skipped, ids: ids,
+  }));
+}
+function _savedNoHeaderIds() {
+  var out = {};
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(NO_HEADER_PROP);
+    var obj = raw ? JSON.parse(raw) : null;
+    (obj && obj.ids || []).forEach(function (id) { out[id] = true; });
+  } catch (e) {}
+  return out;
+}
+
+// True when the Doc's latest sync line in the refresh log says the header failed.
+function _lastSyncNoHeader(desc) {
+  var lines = String(desc || '').split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line || line.indexOf('KA_META:') === 0) continue;
+    return /no header/i.test(line);
+  }
+  return false;
+}
+
+/**
+ * Logs, per team, how many KA Docs have the page header, and lists the ones
+ * that don't (with the error, if the Doc couldn't be opened). Changes no Doc;
+ * saves the list so the next audit shows those Docs as NO_HEADER.
+ */
+function checkKaHeaders() {
+  var scan = _scanKaHeaders(300000);
+  _saveNoHeaderIds(scan);
   Logger.log('KA page headers (KA Sync ' + KA_SYNC_HEADER_TOOL_VERSION + ')');
-  Object.keys(stats).forEach(function (k) {
-    Logger.log('  ' + k + ': ' + stats[k].ok + ' with header, ' + stats[k].missing + ' without');
+  Object.keys(scan.stats).forEach(function (k) {
+    Logger.log('  ' + k + ': ' + scan.stats[k].ok + ' with header, ' + scan.stats[k].missing + ' without');
   });
-  if (skipped) Logger.log('  Stopped early (time limit): ' + skipped + ' Docs not checked. Run again.');
-  Logger.log('\nDocs without header (' + missing.length + '):\n' + missing.join('\n'));
+  if (scan.skipped) Logger.log('  Stopped early (time limit): ' + scan.skipped + ' Docs not checked. Run again.');
+  Logger.log('\nDocs without header (' + scan.missing.length + '):\n' + scan.missing.map(function (m) {
+    return '[' + m.team + '] ' + m.name + (m.error ? '  (error: ' + m.error + ')' : '') + '\n    ' + m.url;
+  }).join('\n'));
+}
+
+// Daily, from the trigger: same check, no log needed, just save the list.
+function dailyHeaderCheck() {
+  _saveNoHeaderIds(_scanKaHeaders(300000));
+}
+
+// Run ONCE in the editor: sets the daily header check (about 3 AM Pacific).
+function installHeaderCheckTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'dailyHeaderCheck') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('dailyHeaderCheck').timeBased().everyDays(1).atHour(3).inTimezone(LOCAL_TZ).create();
+  Logger.log('Daily header check is set (dailyHeaderCheck, about 3 AM Pacific).');
 }
 
 /**
@@ -633,7 +697,7 @@ function fixMissingHeaders() {
   if (left) Logger.log('\nStopped early (time limit): ' + left + ' Docs left. Run fixMissingHeaders again.');
 }
 
-var KA_SYNC_HEADER_TOOL_VERSION = '2.9.5';
+var KA_SYNC_HEADER_TOOL_VERSION = '2.9.6';
 
 /**
  * Previous refresh = the most recent log line in the Drive description
@@ -858,6 +922,7 @@ var AUDIT_STATUSES = [
   { key: 'MISSING_DOC',         label: 'In Salesforce, no Doc',          color: '#f4c7c3' },
   { key: 'ARCHIVED_BUT_ACTIVE', label: 'Archived by mistake',            color: '#f4c7c3' },
   { key: 'EMPTY_DOC',           label: 'Doc is empty',                   color: '#f4c7c3' },
+  { key: 'NO_HEADER',           label: 'Doc missing gray KA info',       color: '#f9cb9c' },
   { key: 'DUPLICATE_DOCS',      label: 'Duplicate Docs',                 color: '#fce8b2' },
   { key: 'OUTDATED',            label: 'Outdated',                       color: '#fce8b2' },
   { key: 'WRONG_TEAM',          label: 'Different team',                 color: '#fff2cc' },
@@ -910,6 +975,7 @@ function _auditDocs(folderId) {
         kaId: meta.kaId, slug: _slugOf(meta.url),
         team: _teamFromTitle(d.title || ''),
         modifiedMs: d.modifiedDate ? new Date(d.modifiedDate).getTime() : 0,
+        lastSyncNoHeader: _lastSyncNoHeader(d.description || ''),
       });
     }
     pageToken = resp.nextPageToken;
@@ -985,6 +1051,10 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
         if (/^\s*untitled\b/i.test(doc.title || '')) {
           found.push('EMPTY_DOC');
           notes.push('The Doc came out "Untitled" with no text from a sync: click Update on the KA');
+        }
+        if (doc.lastSyncNoHeader || (opts.noHeader && opts.noHeader(doc.docId))) {
+          found.push('NO_HEADER');
+          notes.push('The gray KA info at the top of the Doc is missing: click Update on the KA, or Run fixMissingHeaders in KA Sync');
         }
         var sfMs = ka.lastModified ? Date.parse(ka.lastModified) : 0;
         if (sfMs && doc.modifiedMs && sfMs - doc.modifiedMs > OUTDATED_TOLERANCE_MS) {
@@ -1093,7 +1163,11 @@ function handleAudit(req) {
 
   var pubDocs = _auditDocs(KA_FOLDER_ID);
   var arcDocs = _auditDocs(ARCHIVED_FOLDER_ID);
-  var result = runAudit(req.reports, req.published || [], pubDocs, arcDocs, { docVersion: _docHeaderVersion });
+  var noHeaderIds = _savedNoHeaderIds();
+  var result = runAudit(req.reports, req.published || [], pubDocs, arcDocs, {
+    docVersion: _docHeaderVersion,
+    noHeader: function (docId) { return !!noHeaderIds[docId]; },
+  });
   var suspect = _suspectAudit(result.rows);
   if (suspect) return { ok: false, code: 'INCOMPLETE_REPORT', error: suspect, counts: result.counts };
 
