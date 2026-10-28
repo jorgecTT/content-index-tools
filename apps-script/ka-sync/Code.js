@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.9.4)
+ * KA Sync v2 — Google Apps Script backend (v2.9.5)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,13 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.5
+ *   - The page header is now CHECKED after it is written: the Doc is opened
+ *     again and, if the header is not there (the Drive convert can land a few
+ *     seconds later and wipe it), it is written again, up to 4 tries. A sync
+ *     whose header still did not stick says so in the refresh log
+ *     ("(v2 sync, no header: ...)") and in the result (headerOk:false).
  *
  * v2.9.4
  *   - Page header (the 6 gray metadata lines) is written FIRST and on its own.
@@ -395,12 +402,13 @@ function handleSync(req, t0) {
     fileId = created.id;
   }
 
-  // Post-process: page header + whole-doc Montserrat.
-  var pp = _postProcess(fileId, req, today, prevRefresh) || {};
+  // Post-process: page header + whole-doc Montserrat, checked and retried.
+  var pp = _postProcessVerified(fileId, req, today, prevRefresh) || {};
 
   // Metadata for the next change detection + refresh log + named version.
   var newFile = DriveApp.getFileById(fileId);
-  var logEntry = today + ' — ' + req.reviewer + (mode === 'create' ? ' (v2 created)' : ' (v2 sync)');
+  var logEntry = today + ' — ' + req.reviewer + (mode === 'create' ? ' (v2 created' : ' (v2 sync') +
+    (pp.headerOk === false ? ', no header: ' + String(pp.headerError || 'unknown').slice(0, 120).replace(/[()\n]/g, ' ') : '') + ')';
   updateDescriptionLog(newFile, logEntry, req.kaId || '', canonicalUrl,
     normalizeTimestamp(req.lastModified || ''));
   nameCurrentVersion(fileId, (mode === 'create' ? 'Created ' : 'Sync ') + today);
@@ -453,6 +461,25 @@ function _postProcess(fileId, req, today, prevRefresh) {
     if (res.headerOk) res = { headerOk: false, headerError: 'Could not save the Doc: ' + eSave };
   }
   return res;
+}
+
+// Writes the header, then opens the Doc again to make sure it is really there.
+// The converted content can arrive a moment after the first write and wipe it.
+function _postProcessVerified(fileId, req, today, prevRefresh) {
+  var last = { headerOk: false, headerError: 'not tried' };
+  for (var attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) Utilities.sleep(3000 * attempt);
+    last = _postProcess(fileId, req, today, prevRefresh) || last;
+    Utilities.sleep(2000);
+    var h = _headerTextOf(fileId);
+    var txt = h.text || '';
+    if (txt.indexOf('Published link:') !== -1 && txt.indexOf('Current refresh: ' + today) !== -1) {
+      return { headerOk: true, attempts: attempt + 1 };
+    }
+    last = { headerOk: false, headerError: h.error || last.headerError || 'header did not stick' };
+    if (!last.headerError || last.headerError === 'not tried') last.headerError = 'header did not stick';
+  }
+  return last;
 }
 
 // Right after a Drive convert, a big Doc can still be "inaccessible" for a moment.
@@ -606,7 +633,7 @@ function fixMissingHeaders() {
   if (left) Logger.log('\nStopped early (time limit): ' + left + ' Docs left. Run fixMissingHeaders again.');
 }
 
-var KA_SYNC_HEADER_TOOL_VERSION = '2.9.4';
+var KA_SYNC_HEADER_TOOL_VERSION = '2.9.5';
 
 /**
  * Previous refresh = the most recent log line in the Drive description
