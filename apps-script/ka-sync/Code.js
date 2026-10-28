@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.9.3)
+ * KA Sync v2 — Google Apps Script backend (v2.9.4)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,19 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.4
+ *   - Page header (the 6 gray metadata lines) is written FIRST and on its own.
+ *     Before, the header and the Montserrat pass shared one try/catch, so on
+ *     some Docs (Trust & Safety KAs) the header was silently skipped. Opening
+ *     the Doc right after the convert is retried a few times, and the sync
+ *     result now says headerOk / headerError instead of hiding the problem.
+ *   - NEW checkKaHeaders(): Run it in the editor. Logs, per team, which KA Docs
+ *     have no page header and why.
+ *   - NEW fixMissingHeaders(): Run it in the editor. Adds the page header to
+ *     every KA Doc that has none, from what the Doc already stores (link, KA ID,
+ *     Salesforce date, refresh history). "Version" says "Not listed" until the
+ *     next sync of that KA.
  *
  * v2.9.3
  *   - audit: a Doc that came out "Untitled" (a sync of a half-loaded KA) is EMPTY_DOC,
@@ -382,8 +395,8 @@ function handleSync(req, t0) {
     fileId = created.id;
   }
 
-  // Post-process: whole-doc Montserrat + page header.
-  _postProcess(fileId, req, today, prevRefresh);
+  // Post-process: page header + whole-doc Montserrat.
+  var pp = _postProcess(fileId, req, today, prevRefresh) || {};
 
   // Metadata for the next change detection + refresh log + named version.
   var newFile = DriveApp.getFileById(fileId);
@@ -398,6 +411,8 @@ function handleSync(req, t0) {
     docUrl: 'https://docs.google.com/document/d/' + fileId + '/edit',
     filename: filename,
     articleTitle: req.title,
+    headerOk: pp.headerOk !== false,
+    headerError: pp.headerError || '',
     elapsedMs: Date.now() - t0,
   };
 }
@@ -408,35 +423,59 @@ function handleSync(req, t0) {
  * carried over from the doc's history.
  */
 function _postProcess(fileId, req, today, prevRefresh) {
+  var prevLine = 'N/A';
+  if (prevRefresh && prevRefresh.date) {
+    prevLine = prevRefresh.date + (prevRefresh.reviewer ? ' — ' + prevRefresh.reviewer : '');
+  }
+  var lines = [
+    'Published link: ' + (req.url || 'Not listed'),
+    'KA ID: ' + (req.kaId || 'Not listed'),
+    'Version: ' + (req.version || 'Not listed'),
+    'Last modified in Salesforce: ' + (req.lastModified || 'Not listed'),
+    'Current refresh: ' + today + ' — ' + (req.reviewer || ''),
+    'Previous refresh: ' + prevLine,
+  ];
+
+  var opened = _openDocWithRetry(fileId);
+  if (!opened.doc) return { headerOk: false, headerError: 'Could not open the Doc: ' + opened.error };
+  var doc = opened.doc;
+
+  // 1) Page header first, on its own, so nothing else can make it skip.
+  var res = _writePageHeader(doc, lines, req.url);
+
+  // 2) Whole-doc Montserrat. Optional: if it fails the header is already there.
   try {
-    var doc = DocumentApp.openById(fileId);
+    var bodyText = doc.getBody().editAsText();
+    if (bodyText.getText().length > 0) bodyText.setFontFamily('Montserrat');
+  } catch (eFont) {}
 
-    try {
-      var bodyText = doc.getBody().editAsText();
-      if (bodyText.getText().length > 0) bodyText.setFontFamily('Montserrat');
-    } catch (eFont) {}
+  try { doc.saveAndClose(); } catch (eSave) {
+    if (res.headerOk) res = { headerOk: false, headerError: 'Could not save the Doc: ' + eSave };
+  }
+  return res;
+}
 
-    var header;
+// Right after a Drive convert, a big Doc can still be "inaccessible" for a moment.
+function _openDocWithRetry(fileId) {
+  var lastErr = '';
+  for (var i = 0; i < 4; i++) {
+    try { return { doc: DocumentApp.openById(fileId) }; }
+    catch (e) { lastErr = String(e && e.message || e); Utilities.sleep(1500 * (i + 1)); }
+  }
+  return { doc: null, error: lastErr };
+}
+
+/**
+ * The standard 6-line gray page header: no underline, breathing room above
+ * and below. Returns { headerOk, headerError }.
+ */
+function _writePageHeader(doc, lines, url) {
+  try {
+    var header = null;
     try { header = doc.getHeader(); } catch (e) { header = null; }
-    if (!header) {
-      try { header = doc.addHeader(); } catch (e2) { header = doc.getHeader(); }
-    }
-    if (!header) { doc.saveAndClose(); return; }
+    if (!header) header = doc.addHeader();
+    if (!header) return { headerOk: false, headerError: 'The Doc has no header and one could not be added' };
     header.clear();
-
-    var prevLine = 'N/A';
-    if (prevRefresh && prevRefresh.date) {
-      prevLine = prevRefresh.date + (prevRefresh.reviewer ? ' — ' + prevRefresh.reviewer : '');
-    }
-
-    var lines = [
-      'Published link: ' + (req.url || 'Not listed'),
-      'KA ID: ' + (req.kaId || 'Not listed'),
-      'Version: ' + (req.version || 'Not listed'),
-      'Last modified in Salesforce: ' + (req.lastModified || 'Not listed'),
-      'Current refresh: ' + today + ' — ' + (req.reviewer || ''),
-      'Previous refresh: ' + prevLine,
-    ];
 
     for (var i = 0; i < lines.length; i++) {
       var para = header.appendParagraph(lines[i]);
@@ -451,13 +490,13 @@ function _postProcess(fileId, req, today, prevRefresh) {
         t.setBold(0, len - 1, false);
         t.setUnderline(0, len - 1, false);
       }
-      if (i === 0 && req.url) {
+      if (i === 0 && url && /^https?:/i.test(url)) {
         try {
           var urlStart = 'Published link: '.length;
-          t.setLinkUrl(urlStart, len - 1, req.url);
+          t.setLinkUrl(urlStart, len - 1, url);
           t.setForegroundColor(urlStart, len - 1, PAGE_HEADER_STYLE.color);
           t.setUnderline(urlStart, len - 1, false);
-        } catch (e) {}
+        } catch (eL) {}
       }
     }
 
@@ -468,11 +507,106 @@ function _postProcess(fileId, req, today, prevRefresh) {
         first.removeFromParent();
       }
     }
-    doc.saveAndClose();
+    return { headerOk: true };
   } catch (e) {
-    // Post-processing must never fail the sync.
+    return { headerOk: false, headerError: String(e && e.message || e) };
   }
 }
+
+// ─── PAGE HEADER CHECK & REPAIR (Run these in the editor) ──────────────────
+
+// Header text of a Doc, or { error } if the Doc can't be read.
+function _headerTextOf(fileId) {
+  var o = _openDocWithRetry(fileId);
+  if (!o.doc) return { error: o.error };
+  try {
+    var h = o.doc.getHeader();
+    return { text: h ? (h.getText() || '') : '' };
+  } catch (e) { return { error: String(e && e.message || e) }; }
+}
+
+function _kaDocsInFolder() {
+  var out = [];
+  var it = DriveApp.getFolderById(KA_FOLDER_ID).getFilesByType(MimeType.GOOGLE_DOCS);
+  while (it.hasNext()) out.push(it.next());
+  return out;
+}
+
+/**
+ * Logs, per team, how many KA Docs have the page header, and lists the ones
+ * that don't (with the error, if the Doc couldn't be opened). Changes nothing.
+ */
+function checkKaHeaders() {
+  var t0 = Date.now();
+  var stats = {}, missing = [], skipped = 0;
+  var files = _kaDocsInFolder();
+  for (var i = 0; i < files.length; i++) {
+    if (Date.now() - t0 > 300000) { skipped = files.length - i; break; }
+    var f = files[i];
+    var team = inferAudience(f.getName()) || 'other';
+    stats[team] = stats[team] || { ok: 0, missing: 0 };
+    var h = _headerTextOf(f.getId());
+    if (h.text && h.text.indexOf('Published link:') !== -1) { stats[team].ok++; continue; }
+    stats[team].missing++;
+    missing.push('[' + team + '] ' + f.getName() + (h.error ? '  (error: ' + h.error + ')' : '') + '\n    ' + f.getUrl());
+  }
+  Logger.log('KA page headers (KA Sync ' + KA_SYNC_HEADER_TOOL_VERSION + ')');
+  Object.keys(stats).forEach(function (k) {
+    Logger.log('  ' + k + ': ' + stats[k].ok + ' with header, ' + stats[k].missing + ' without');
+  });
+  if (skipped) Logger.log('  Stopped early (time limit): ' + skipped + ' Docs not checked. Run again.');
+  Logger.log('\nDocs without header (' + missing.length + '):\n' + missing.join('\n'));
+}
+
+/**
+ * Adds the page header to every KA Doc that has none, using what the Doc
+ * already stores in its Drive description (KA_META + refresh history).
+ * Docs that already have a header are not touched. Safe to run again: it
+ * picks up where it stopped.
+ */
+function fixMissingHeaders() {
+  var t0 = Date.now();
+  var fixed = [], failed = [], left = 0;
+  var files = _kaDocsInFolder();
+  for (var i = 0; i < files.length; i++) {
+    if (Date.now() - t0 > 300000) { left = files.length - i; break; }
+    var f = files[i];
+    var h = _headerTextOf(f.getId());
+    if (h.text && h.text.indexOf('Published link:') !== -1) continue;
+
+    var desc = f.getDescription() || '';
+    var m = desc.match(/^KA_META:([^|\n]*)\|([^|\n]*)\|?([^\n]*)/);
+    var kaId = m ? m[1].trim() : '';
+    var url = m ? m[2].trim() : '';
+    var lastMod = m ? m[3].trim() : '';
+    var log = [];
+    desc.split('\n').forEach(function (line) {
+      var r = line.trim().match(/^(\d{4}-\d{2}-\d{2})\s*(?:—|-)\s*([^(]+)/);
+      if (r) log.push(r[1] + ' — ' + r[2].trim());
+    });
+    if (url) url = url.replace(/\/articles\/knowledge\//i, '/articles/Knowledge/');
+
+    var lines = [
+      'Published link: ' + (url || 'Not listed'),
+      'KA ID: ' + (kaId || 'Not listed'),
+      'Version: Not listed',
+      'Last modified in Salesforce: ' + (lastMod || 'Not listed'),
+      'Current refresh: ' + (log[0] || 'Not listed'),
+      'Previous refresh: ' + (log[1] || 'N/A'),
+    ];
+    var o = _openDocWithRetry(f.getId());
+    if (!o.doc) { failed.push(f.getName() + '  (error: ' + o.error + ')'); continue; }
+    var res = _writePageHeader(o.doc, lines, url);
+    try { o.doc.saveAndClose(); } catch (eS) {}
+    if (res.headerOk) fixed.push(f.getName());
+    else failed.push(f.getName() + '  (error: ' + res.headerError + ')');
+  }
+  Logger.log('Headers added: ' + fixed.length + '\n  ' + fixed.join('\n  '));
+  if (failed.length) Logger.log('\nCould not fix (' + failed.length + '):\n  ' + failed.join('\n  '));
+  if (left) Logger.log('\nStopped early (time limit): ' + left + ' Docs left. Run fixMissingHeaders again.');
+}
+
+var KA_SYNC_HEADER_TOOL_VERSION = '2.9.4';
 
 /**
  * Previous refresh = the most recent log line in the Drive description
