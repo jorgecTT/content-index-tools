@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.9.0
+// @version      2.9.1
 // @updateURL    https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, plus Update from Doc and ES Talking Points. Admin mode (Tampermonkey menu) adds batch refresh, the weekly audit, weekly report and Fix from audit. One script for the whole team.
@@ -98,6 +98,8 @@
  *   "Test 5" removed. The audit also records who last edited each KA in
  *   Salesforce (LastModifiedBy), shown in Fix from audit and the email.
  *
+ * v2.9.1 - ES Talking Points: the Spanish takes the look of the English cell next to it
+ *   (font, size, color, line spacing and paragraph style).
  * v2.9.0 - "ES Talking Points" (admin, testing): pastes the Spanish approved in the dashboard
  *   (Spanish Talking Points > Fix TPs > Send to Salesforce) into the Spanish column of the KA's
  *   talking point tables, found by the English. Help Center links go to the Spanish article; old
@@ -126,7 +128,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.9.0';
+  const SCRIPT_VERSION = '2.9.1';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -1587,6 +1589,29 @@
       walk(src, out);
       return out;
     }
+    // The Spanish gets the look of the English cell next to it: same font, size, color and line spacing,
+    // and the same paragraph style (margins). Bold and links stay as the Spanish has them.
+    function mimicEnglish(holder, enCell) {
+      const doc = enCell.ownerDocument, win = doc.defaultView;
+      const tw = doc.createTreeWalker(enCell, NodeFilter.SHOW_TEXT); let tn = null;
+      while (tw.nextNode()) if (tw.currentNode.nodeValue.trim()) { tn = tw.currentNode; break; }
+      if (!tn || !win) return;
+      const cs = win.getComputedStyle(tn.parentElement);
+      const font = 'font-family:' + cs.fontFamily + ';font-size:' + cs.fontSize + ';color:' + cs.color;
+      const enP = enCell.querySelector('p'), enLi = enCell.querySelector('li'), enList = enCell.querySelector('ul,ol');
+      const pStyle = (enP && enP.getAttribute('style')) || '', liStyle = (enLi && enLi.getAttribute('style')) || pStyle;
+      const lh = enP ? win.getComputedStyle(enP).lineHeight : cs.lineHeight;
+      const blockCss = (st) => (st ? st.replace(/;?\s*$/, ';') : '') + (lh && lh !== 'normal' && !/line-height/i.test(st) ? 'line-height:' + lh + ';' : '');
+      holder.querySelectorAll('p').forEach(p => { const css = blockCss(pStyle); if (css) p.setAttribute('style', css); });
+      holder.querySelectorAll('li').forEach(li => { const css = blockCss(liStyle); if (css) li.setAttribute('style', css); });
+      if (enList) holder.querySelectorAll('ul,ol').forEach(l => { const st = enList.getAttribute('style'); if (st) l.setAttribute('style', st); });
+      // the text inside each paragraph or bullet goes in a span with the English font
+      holder.querySelectorAll('p,li').forEach(b => {
+        const span = document.createElement('span'); span.setAttribute('style', font);
+        Array.from(b.childNodes).filter(n => !(n.nodeType === 1 && /^(UL|OL)$/.test(n.tagName))).forEach(n => span.appendChild(n));
+        b.insertBefore(span, b.firstChild);
+      });
+    }
     async function fixHcLinks(holder, notes) {
       const arts = await hcArticles();
       const byEn = s => arts.find(x => hcSlug(x.urlEN) === s) || null, isEs = s => arts.some(x => hcSlug(x.urlES) === s || hcSlug(x.urlPT) === s);
@@ -1630,7 +1655,7 @@
         const cells = Array.from(tr.children), en = cells[t.ei], es = cells[t.si]; if (!en || !es) continue;
         const k = tpKey(en.textContent), r = want.get(k); if (!r) continue;
         used.add(k);
-        const holder = cleanTpHtml(r.es); await fixHcLinks(holder, notes);
+        const holder = cleanTpHtml(r.es); await fixHcLinks(holder, notes); mimicEnglish(holder, en);
         if (tpKey(es.textContent) === tpKey(holder.textContent) && es.innerHTML.replace(/\s+/g, '') === holder.innerHTML.replace(/\s+/g, '')) { same++; continue; }
         while (es.firstChild) es.removeChild(es.firstChild);
         Array.from(holder.childNodes).forEach(n => es.appendChild(es.ownerDocument.importNode(n, true)));
