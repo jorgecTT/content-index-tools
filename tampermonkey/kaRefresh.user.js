@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.9.1
+// @version      2.9.3
 // @updateURL    https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, plus Update from Doc and ES Talking Points. Admin mode (Tampermonkey menu) adds batch refresh, the weekly audit, weekly report and Fix from audit. One script for the whole team.
@@ -98,6 +98,10 @@
  *   "Test 5" removed. The audit also records who last edited each KA in
  *   Salesforce (LastModifiedBy), shown in Fix from audit and the email.
  *
+ * v2.9.3 - ES Talking Points: numbered steps and sub-items stay numbered and nested (as the
+ *   dashboard now sends them), and the empty line the English leaves around a list is kept.
+ * v2.9.2 - ES Talking Points: also copies the English spacing (line height and space between
+ *   paragraphs, as Salesforce shows it), so both columns line up.
  * v2.9.1 - ES Talking Points: the Spanish takes the look of the English cell next to it
  *   (font, size, color, line spacing and paragraph style).
  * v2.9.0 - "ES Talking Points" (admin, testing): pastes the Spanish approved in the dashboard
@@ -128,7 +132,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.9.1';
+  const SCRIPT_VERSION = '2.9.3';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -1593,18 +1597,27 @@
     // and the same paragraph style (margins). Bold and links stay as the Spanish has them.
     function mimicEnglish(holder, enCell) {
       const doc = enCell.ownerDocument, win = doc.defaultView;
-      const tw = doc.createTreeWalker(enCell, NodeFilter.SHOW_TEXT); let tn = null;
-      while (tw.nextNode()) if (tw.currentNode.nodeValue.trim()) { tn = tw.currentNode; break; }
-      if (!tn || !win) return;
+      const firstText = el => { const tw = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT); while (tw.nextNode()) if (tw.currentNode.nodeValue.trim()) return tw.currentNode; return null; };
+      const tn = firstText(enCell); if (!tn || !win) return;
       const cs = win.getComputedStyle(tn.parentElement);
-      const font = 'font-family:' + cs.fontFamily + ';font-size:' + cs.fontSize + ';color:' + cs.color;
-      const enP = enCell.querySelector('p'), enLi = enCell.querySelector('li'), enList = enCell.querySelector('ul,ol');
-      const pStyle = (enP && enP.getAttribute('style')) || '', liStyle = (enLi && enLi.getAttribute('style')) || pStyle;
-      const lh = enP ? win.getComputedStyle(enP).lineHeight : cs.lineHeight;
-      const blockCss = (st) => (st ? st.replace(/;?\s*$/, ';') : '') + (lh && lh !== 'normal' && !/line-height/i.test(st) ? 'line-height:' + lh + ';' : '');
-      holder.querySelectorAll('p').forEach(p => { const css = blockCss(pStyle); if (css) p.setAttribute('style', css); });
-      holder.querySelectorAll('li').forEach(li => { const css = blockCss(liStyle); if (css) li.setAttribute('style', css); });
-      if (enList) holder.querySelectorAll('ul,ol').forEach(l => { const st = enList.getAttribute('style'); if (st) l.setAttribute('style', st); });
+      // the block (paragraph, div or bullet) that holds that text, and its spacing as the browser shows it
+      const blockOf = n => { for (let e = n.parentElement; e && e !== enCell; e = e.parentElement) { const d = win.getComputedStyle(e).display; if (d === 'block' || d === 'list-item') return e; } return null; };
+      const spacing = e => { const c = e ? win.getComputedStyle(e) : null; return 'margin-top:' + (c ? c.marginTop : '0px') + ';margin-bottom:' + (c ? c.marginBottom : '0px') + ';line-height:' + cs.lineHeight + ';'; };
+      const enLiText = enCell.querySelector('li') && firstText(enCell.querySelector('li'));
+      const pCss = spacing(blockOf(tn)), liCss = enLiText ? spacing(blockOf(enLiText)) : pCss;
+      const font = 'font-family:' + cs.fontFamily + ';font-size:' + cs.fontSize + ';color:' + cs.color + ';line-height:' + cs.lineHeight;
+      const enList = enCell.querySelector('ul,ol');
+      holder.querySelectorAll('p').forEach(p => p.setAttribute('style', pCss));
+      holder.querySelectorAll('li').forEach(li => li.setAttribute('style', liCss));
+      if (enList) { const lc = win.getComputedStyle(enList); holder.querySelectorAll('ul,ol').forEach(l => l.setAttribute('style', 'margin-top:' + lc.marginTop + ';margin-bottom:' + lc.marginBottom + ';padding-left:' + lc.paddingLeft + ';')); }
+      // the English leaves an empty line before or after its lists: the Spanish does the same
+      const kids = Array.from(enCell.children), empty = e => e && /^(P|DIV)$/.test(e.tagName) && !e.textContent.trim() && !e.querySelector('img');
+      const gapBefore = kids.some((e, i) => /^(UL|OL)$/.test(e.tagName) && empty(kids[i - 1])), gapAfter = kids.some((e, i) => /^(UL|OL)$/.test(e.tagName) && empty(kids[i + 1]));
+      const blank = () => { const p = document.createElement('p'); p.setAttribute('style', pCss); p.appendChild(document.createElement('br')); return p; };
+      Array.from(holder.children).filter(e => /^(UL|OL)$/.test(e.tagName)).forEach(l => {
+        if (gapBefore && l.previousElementSibling && !empty(l.previousElementSibling)) holder.insertBefore(blank(), l);
+        if (gapAfter && l.nextElementSibling && !empty(l.nextElementSibling)) holder.insertBefore(blank(), l.nextElementSibling);
+      });
       // the text inside each paragraph or bullet goes in a span with the English font
       holder.querySelectorAll('p,li').forEach(b => {
         const span = document.createElement('span'); span.setAttribute('style', font);
