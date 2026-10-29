@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.8.2
+// @version      2.9.0
 // @updateURL    https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/kaRefresh.user.js
-// @description  One-click sync of the current Salesforce KA to its Google Doc, plus Update from Doc. Admin mode (Tampermonkey menu) adds batch refresh, the weekly audit, weekly report and Fix from audit. One script for the whole team.
+// @description  One-click sync of the current Salesforce KA to its Google Doc, plus Update from Doc and ES Talking Points. Admin mode (Tampermonkey menu) adds batch refresh, the weekly audit, weekly report and Fix from audit. One script for the whole team.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
 // @noframes
@@ -17,6 +17,8 @@
 // @connect      script.googleusercontent.com
 // @connect      docs.google.com
 // @connect      googleusercontent.com
+// @connect      help.thumbtack.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -96,6 +98,11 @@
  *   "Test 5" removed. The audit also records who last edited each KA in
  *   Salesforce (LastModifiedBy), shown in Fix from audit and the email.
  *
+ * v2.9.0 - "ES Talking Points" (admin, testing): pastes the Spanish approved in the dashboard
+ *   (Spanish Talking Points > Fix TPs > Send to Salesforce) into the Spanish column of the KA's
+ *   talking point tables, found by the English. Help Center links go to the Spanish article; old
+ *   links are followed to where they go now. Only the Spanish cells change. Never saves.
+ *
  * v2.8.0 - ONE script for everyone, installed from content-index-tools (auto-updates).
  *   Writers see Update and + New (2.8.1: Update from Doc is admin-only while in testing). Tampermonkey menu -> "Admin mode"
  *   adds the batch, audit, weekly report and Fix from audit buttons. Works with the
@@ -119,7 +126,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.8.2';
+  const SCRIPT_VERSION = '2.9.0';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -1508,12 +1515,12 @@
     function render(id, lines, running, finished) {
       let box = document.getElementById('kwp-box');
       if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-      box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">\u270E Update from Doc' + (running ? ' \u00B7 working\u2026' : '') + '</div>' +
+      box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">' + esc(boxTitle) + (running ? ' \u00B7 working\u2026' : '') + '</div>' +
         (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
         lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
           (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('');
       if (finished) {
-        const text = 'Update from Doc (KA Refresh ' + SCRIPT_VERSION + ') - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+        const text = boxTitle + ' (KA Refresh ' + SCRIPT_VERSION + ') - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
         document.getElementById('kwp-copy').onclick = async () => {
           try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
           catch (e) { window.prompt('Copy this:', text); }
@@ -1521,9 +1528,10 @@
         document.getElementById('kwp-close').onclick = () => box.remove();
       }
     }
-    let running = false;
+    let running = false, boxTitle = '\u270E Update from Doc';
     async function run() {
       if (running) return;
+      boxTitle = '\u270E Update from Doc';
       const id = (location.href.match(/\/Knowledge__kav\/([a-zA-Z0-9]{15,18})/) || [])[1] || '';
       const lines = [];
       const add = (ok, label, detail) => { lines.push({ ok, label, detail: detail || '' }); render(id, lines, true); };
@@ -1545,7 +1553,134 @@
       running = false;
       render(id, lines, false, true);
     }
-    return { run };
+
+    // ---------- ES Talking Points (2.9.0) ----------
+    // In the Content Index Dashboard (Spanish Talking Points > Fix TPs > Send to Salesforce) the writer copies
+    // the approved Spanish. Here it goes into the Spanish column of the KA's talking point tables, row by row,
+    // found by the English. Help Center links go to the Spanish article, and old links are followed to the page
+    // they go to now. Only the Spanish cells change, nothing else. It never saves.
+    // letters and numbers only: the same English matches even if Salesforce splits it into other paragraphs or spaces
+    const tpKey = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+    const hcSlug = u => ((String(u || '').match(/^https?:\/\/help\.thumbtack\.com\/(?:[a-z-]+\/)?article\/([^?#\/\s]+)/i) || [])[1] || '').toLowerCase();
+    function gmFinal(url) {
+      return new Promise(res => GM_xmlhttpRequest({ method: 'GET', url, timeout: 15000,
+        onload: r => res(r.status >= 200 && r.status < 400 ? (r.finalUrl || url) : null), onerror: () => res(null), ontimeout: () => res(null) }));
+    }
+    let _arts = null;
+    async function hcArticles() {
+      if (_arts) return _arts;
+      try { _arts = JSON.parse(await gmGet('https://raw.githubusercontent.com/jorgecTT/tt-glossary/main/articles.json')).articles || []; } catch (e) { _arts = []; }
+      return _arts;
+    }
+    // Only plain formatting goes into Salesforce: paragraphs, lists, bold, italics, links, line breaks
+    function cleanTpHtml(html) {
+      const src = new DOMParser().parseFromString('<body>' + html + '</body>', 'text/html').body, out = document.createElement('div');
+      const OK = { P: 'p', UL: 'ul', OL: 'ol', LI: 'li', STRONG: 'strong', B: 'strong', EM: 'em', I: 'em', BR: 'br', A: 'a' };
+      const walk = (from, to) => from.childNodes.forEach(n => {
+        if (n.nodeType === 3) { to.appendChild(document.createTextNode(n.nodeValue)); return; }
+        if (n.nodeType !== 1) return;
+        const tag = OK[n.tagName]; if (!tag) { walk(n, to); return; }
+        const el = document.createElement(tag);
+        if (tag === 'a') { const h = n.getAttribute('href') || ''; if (!/^(https?:|#|mailto:)/i.test(h)) { walk(n, to); return; } el.setAttribute('href', h); if (!/^#/.test(h)) el.setAttribute('target', '_blank'); }
+        to.appendChild(el); if (tag !== 'br') walk(n, el);
+      });
+      walk(src, out);
+      return out;
+    }
+    async function fixHcLinks(holder, notes) {
+      const arts = await hcArticles();
+      const byEn = s => arts.find(x => hcSlug(x.urlEN) === s) || null, isEs = s => arts.some(x => hcSlug(x.urlES) === s || hcSlug(x.urlPT) === s);
+      for (const a of holder.querySelectorAll('a[href]')) {
+        const url = a.getAttribute('href'), slug = hcSlug(url); if (!slug || isEs(slug)) continue;
+        let row = byEn(slug), now = slug;
+        if (!row) {   // not in the list: follow the old link to where it goes now
+          const fin = await gmFinal(url), s2 = hcSlug(fin);
+          if (!s2) { notes.push('Couldn\'t open ' + url + ': left as it is, check it.'); continue; }
+          now = s2;
+          if (isEs(s2)) { a.setAttribute('href', fin); notes.push('Old link ' + slug + ' now goes to ' + s2 + '.'); continue; }
+          row = byEn(s2);
+          if (!row) { if (s2 !== slug) { a.setAttribute('href', 'https://help.thumbtack.com/article/' + s2); notes.push('Old link ' + slug + ' now goes to ' + s2 + ' (not in the Spanish list, so in English).'); } else notes.push('No Spanish article for ' + slug + ': the link stays in English.'); continue; }
+        }
+        if (row.urlES) { a.setAttribute('href', row.urlES); notes.push((now !== slug ? 'Old link ' + slug + ' → ' : '') + 'Spanish article: ' + (row.titleES || hcSlug(row.urlES)) + '.'); }
+        else { if (now !== slug) a.setAttribute('href', row.urlEN); notes.push('"' + (row.titleEN || now) + '" has no Spanish article yet: the link stays in English.'); }
+      }
+    }
+    function tpTablesIn(boxes) {
+      const out = [];
+      boxes.forEach(b => b.el.querySelectorAll('table').forEach(t => {
+        if (t.parentElement && t.parentElement.closest('table')) return;
+        const rows = Array.from(t.querySelectorAll('tr')).filter(tr => tr.closest('table') === t); if (rows.length < 2) return;
+        const head = Array.from(rows[0].children).map(c => (c.textContent || '').toLowerCase());
+        const ei = head.findIndex(c => /english/.test(c)), si = head.findIndex(c => /spanish|español|espanol/.test(c));
+        if (ei >= 0 && si >= 0) out.push({ box: b, rows: rows.slice(1), ei, si });
+      }));
+      return out;
+    }
+    function parseTp(txt) {
+      try { const d = JSON.parse(String(txt || '').trim()); return d && d.t === 'kar-estp' && Array.isArray(d.rows) ? d : null; } catch (e) { return null; }
+    }
+    async function applyTp(add, data) {
+      const boxes = contentBoxes();
+      add(true, '1. Spanish from the dashboard', data.rows.length + ' rows for "' + (data.ka || 'this KA') + '"');
+      const tables = tpTablesIn(boxes);
+      if (!tables.length) { add(false, '2. Talking point tables', 'No table with an English and a Spanish column in the boxes. Nothing was changed.'); return; }
+      const want = new Map(data.rows.map(r => [tpKey(r.en), r])), used = new Set(), notes = [], touched = new Set();
+      let done = 0, same = 0;
+      for (const t of tables) for (const tr of t.rows) {
+        const cells = Array.from(tr.children), en = cells[t.ei], es = cells[t.si]; if (!en || !es) continue;
+        const k = tpKey(en.textContent), r = want.get(k); if (!r) continue;
+        used.add(k);
+        const holder = cleanTpHtml(r.es); await fixHcLinks(holder, notes);
+        if (tpKey(es.textContent) === tpKey(holder.textContent) && es.innerHTML.replace(/\s+/g, '') === holder.innerHTML.replace(/\s+/g, '')) { same++; continue; }
+        while (es.firstChild) es.removeChild(es.firstChild);
+        Array.from(holder.childNodes).forEach(n => es.appendChild(es.ownerDocument.importNode(n, true)));
+        touched.add(t.box.el); done++;
+      }
+      touched.forEach(bd => bd.dispatchEvent(new Event('input', { bubbles: true })));
+      const missing = data.rows.filter(r => !used.has(tpKey(r.en)));
+      add(done > 0 || same > 0, '2. Spanish pasted', done + ' Spanish cell' + (done === 1 ? '' : 's') + ' updated in ' + tables.length + ' table' + (tables.length === 1 ? '' : 's') + (same ? ' · ' + same + ' already had that Spanish' : ''));
+      if (missing.length) add(false, '3. Rows not found', missing.length + ' row' + (missing.length === 1 ? '' : 's') + ' not changed: the English in Salesforce is not the same as in the Doc. Click ↑ Update to sync the KA, then Fix TPs again in the dashboard. ' +
+        missing.slice(0, 5).map(r => '"' + r.en.replace(/\s+/g, ' ').slice(0, 70) + '"').join(' · '));
+      if (notes.length) add(true, 'Help Center links', Array.from(new Set(notes)).join(' · '));
+      add(true, 'Next', 'Review the Spanish in the boxes, then click Save. Nothing was saved. After you publish, click ↑ Update so the Doc syncs.');
+    }
+    function askTp(id, lines) {
+      return new Promise(resolve => {
+        render(id, lines, false);
+        const box = document.getElementById('kwp-box'), w = document.createElement('div');
+        w.innerHTML = '<div style="font-size:12px;color:#5B5D62;margin:6px 0">In the dashboard, click <b>Send to Salesforce</b> on this KA. Then come back and click <b>Paste</b> (or click in the box and press Cmd+V).</div>' +
+          '<textarea id="kwp-tp" rows="3" style="width:100%;box-sizing:border-box;font-size:11px;border:1px solid #c9c9c9;border-radius:6px;padding:6px"></textarea>' +
+          '<div style="margin-top:8px"><button class="kwp-b kwp-grey" id="kwp-tpp">Paste</button><button class="kwp-b" id="kwp-tpgo">Apply</button><button class="kwp-b kwp-grey" id="kwp-tpx">Close</button></div>';
+        box.appendChild(w);
+        const ta = w.querySelector('#kwp-tp');
+        ['keydown', 'keyup', 'keypress'].forEach(ev => ta.addEventListener(ev, e => e.stopPropagation()));
+        w.querySelector('#kwp-tpp').onclick = async () => { try { ta.value = await navigator.clipboard.readText(); } catch (e) { ta.focus(); ta.placeholder = 'Click here and press Cmd+V'; } };
+        w.querySelector('#kwp-tpgo').onclick = () => { const d = parseTp(ta.value); if (!d) { ta.style.borderColor = '#C5221F'; ta.value = ''; ta.placeholder = 'That is not the Spanish from the dashboard. Click Send to Salesforce there first.'; return; } w.remove(); resolve(d); };
+        w.querySelector('#kwp-tpx').onclick = () => { w.remove(); resolve(null); };
+      });
+    }
+    async function runTp() {
+      if (running) return;
+      boxTitle = 'ES Talking Points';
+      const id = (location.href.match(/\/Knowledge__kav\/([a-zA-Z0-9]{15,18})/) || [])[1] || '';
+      const lines = [];
+      const add = (ok, label, detail) => { lines.push({ ok, label, detail: detail || '' }); render(id, lines, true); };
+      running = true;
+      try {
+        if (!id) add(false, 'Open the KA first', 'Open the DRAFT of the KA in Salesforce.');
+        else if (!contentBoxes().length) add(false, 'Click Edit first', 'Open the DRAFT of the KA, click Edit (pencil), wait for the content boxes to load, then click ES Talking Points again.');
+        else {
+          let data = null;
+          try { data = parseTp(await navigator.clipboard.readText()); } catch (e) { /* the browser asks first: use the box */ }
+          if (!data) data = await askTp(id, lines);
+          if (!data) add(true, 'Closed', 'Nothing was changed.');
+          else await applyTp(add, data);
+        }
+      } catch (e) { add(false, 'Error', String(e && e.message || e)); }
+      running = false;
+      render(id, lines, false, true);
+    }
+    return { run, runTp };
   })();
 
   function injectUI() {
@@ -1562,7 +1697,8 @@
       '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>' +
       '<button class="kar-main-btn" id="kar-weekly-btn">\uD83D\uDCC5 Weekly report</button>' +
       '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>' +
-      '<button class="kar-main-btn" id="kar-ufd-btn">\u270E Update from Doc</button>'
+      '<button class="kar-main-btn" id="kar-ufd-btn">\u270E Update from Doc</button>' +
+      '<button class="kar-main-btn" id="kar-estp-btn" title="Paste the Spanish talking points you sent from the dashboard (Fix TPs > Send to Salesforce). Open the draft and click Edit first.">ES Talking Points</button>'
       ) : '');
     document.body.appendChild(bar);
     const overlay = document.createElement('div');
@@ -1572,6 +1708,7 @@
     document.getElementById('kar-update-btn').addEventListener('click', () => runIntent('update'));
     document.getElementById('kar-new-btn').addEventListener('click', () => runIntent('new'));
     if (document.getElementById('kar-ufd-btn')) document.getElementById('kar-ufd-btn').addEventListener('click', () => UFD.run());
+    if (document.getElementById('kar-estp-btn')) document.getElementById('kar-estp-btn').addEventListener('click', () => UFD.runTp());
     if (document.getElementById('kar-batch-btn')) document.getElementById('kar-batch-btn').addEventListener('click', () => startBatch(0));
     if (document.getElementById('kar-outdated-btn')) document.getElementById('kar-outdated-btn').addEventListener('click', () => startBatch(0, 'outdated'));
     if (document.getElementById('kar-nodate-btn')) document.getElementById('kar-nodate-btn').addEventListener('click', () => startBatch(0, 'nodate'));
