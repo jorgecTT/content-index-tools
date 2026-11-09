@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mixpanel HC Export - Content Index
 // @namespace    https://thumbtack.com/
-// @version      2.0.0
+// @version      2.0.1
 // @updateURL    https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/mixpanelHcExport.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgecTT/content-index-tools/main/tampermonkey/mixpanelHcExport.user.js
 // @description  One click on a Mixpanel Insights report broken down by Page URL: exports one CSV with Help Center views per article for the last 30, 60 and 90 days and this year, URLs cleaned and grouped per article.
@@ -40,12 +40,16 @@
  * v2.0.0 - one click: the script requests the short date ranges itself and
  *   builds 30 / 60 / 90 days / this year in one CSV. Replaces the manual
  *   period buttons.
+ * v2.0.1 - stricter slugs: a slug is only letters, numbers and "-", so junk
+ *   stuck to the end of a URL (")", "](", "%23...", "&gsessionid=...",
+ *   "%22...") is cut off and counted with the real article. Also applied to
+ *   ranges saved by 2.0.0, so no need to "Forget saved ranges".
  */
 
 (function () {
   'use strict';
 
-  var SCRIPT_VERSION = '2.0.0';
+  var SCRIPT_VERSION = '2.0.1';
   var CACHE_KEY = 'hcExportCache_v2';
   var START_CHUNK_DAYS = 7;
   var PAUSE_MS = (typeof module !== 'undefined' && module.__test) ? 0 : 800;           // pause between requests, to be gentle with Mixpanel
@@ -170,7 +174,13 @@
   function slugOf(u) {
     var m = u.match(/\/article\/([^\/]+)/);
     if (!m) return '';
-    return m[1].split(/https?:/)[0];   // a URL pasted twice keeps the first slug
+    return normSlug(m[1].split(/https?:/)[0]);   // a URL pasted twice keeps the first slug
+  }
+
+  // Real slugs are only a-z, 0-9 and "-". Cut at the first other character.
+  function normSlug(s) {
+    var m = String(s || '').toLowerCase().match(/^[a-z0-9-]+/);
+    return m ? m[0].replace(/-+$/, '') : '';
   }
 
   // -> { cols, rows: {slug: {col: n}}, firstCol, overall, read }
@@ -310,10 +320,12 @@
     entries.forEach(function (e) { e.cols.forEach(function (c) { if (cols.indexOf(c) === -1) cols.push(c); }); });
     var data = {};
     entries.forEach(function (e) {
-      Object.keys(e.rows).forEach(function (slug) {
+      Object.keys(e.rows).forEach(function (rawSlug) {
+        var slug = normSlug(rawSlug);
+        if (!slug) return;
         var d = data[slug] || (data[slug] = {});
         cols.forEach(function (c) {
-          var n = e.rows[slug][c] || 0;
+          var n = e.rows[rawSlug][c] || 0;
           if (!n) return;
           windows.forEach(function (w) {
             if (e.from >= w.start) { var k = c + ' ' + w.key; d[k] = (d[k] || 0) + n; }
