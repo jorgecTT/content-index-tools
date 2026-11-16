@@ -1,13 +1,19 @@
 /**
  * ================================================================
  * Content Audit — Web App  (Piece 2 of 2: serves the Sheet as JSON)
- * v1.9.8
+ * v1.9.9
  * ================================================================
  * Lives in the SAME Apps Script project as CorpusSync.gs.
  * Reuses COLUMNS, getSheet_, and getProp_ from that file — do not
  * redeclare them here. Also reuses TRACKER_TAB_NAME and
  * TRACKER_COLUMNS from LocalizationTracker.gs (v1.4.0), and
  * slugAliasAdd_ from SlugAliases.gs (v1.0.0 — REQUIRED).
+ *
+ * v1.9.9: mode=glossary also returns, per term, the fields of the
+ *   glossary_extra tab (GlossaryDoc.gs): kind (product/ui/term/category),
+ *   app (exact UI form, e.g. Leads ("Prospectos")), variations, doNotUse,
+ *   contextEn. Terms with no glossary_extra row just don't have them.
+ *   Nothing else changes, so every current consumer keeps working.
  *
  * v1.9.8 changes (slug aliases):
  *   - mode=slug_alias_add { oldSlug, source? } — accepts a bare slug
@@ -149,6 +155,26 @@ function doGet(e) {
         if (params.status && String(gObj.status).toLowerCase() !== String(params.status).toLowerCase()) continue;
         if (params.type && String(gObj.type).toLowerCase() !== String(params.type).toLowerCase()) continue;
         terms.push(gObj);
+      }
+      // v1.9.9: merge glossary_extra (app label, variations, do not use, English context)
+      var xsh = gss.getSheetByName('glossary_extra');
+      if (xsh && xsh.getLastRow() > 1) {
+        var xVals = xsh.getRange(1, 1, xsh.getLastRow(), xsh.getLastColumn()).getValues();
+        var xHead = xVals[0].map(function (h) { return String(h); });
+        var xMap = {};
+        for (var xr = 1; xr < xVals.length; xr++) {
+          var xEn = normalize_(String(xVals[xr][xHead.indexOf('en')] || '').trim());
+          if (xEn) xMap[xEn] = xVals[xr];
+        }
+        var xFields = ['kind', 'app', 'variations', 'doNotUse', 'contextEn'];
+        for (var xt = 0; xt < terms.length; xt++) {
+          var xRow = xMap[normalize_(String(terms[xt].en || '').trim())];
+          if (!xRow) continue;
+          for (var xf = 0; xf < xFields.length; xf++) {
+            var xi = xHead.indexOf(xFields[xf]);
+            if (xi !== -1) terms[xt][xFields[xf]] = String(xRow[xi] || '');
+          }
+        }
       }
       return jsonOut_({ ok: true, mode: 'glossary', count: terms.length, terms: terms });
     }
