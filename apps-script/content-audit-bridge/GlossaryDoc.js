@@ -1,5 +1,5 @@
 /* ================================================================
- * GlossaryDoc.gs  v2.0.0  (Nov 16, 2026)
+ * GlossaryDoc.gs  v2.1.0  (Nov 19, 2026)
  * Content Audit Bridge
  *
  * Publishes the approved EN -> ES glossary for people outside the team
@@ -14,6 +14,16 @@
  *                   variations, do not use, English context
  * Rejected and conflict rows never reach the Doc or the Sheet.
  *
+ * v2.1.0: Read me says how strict each type is (product names and app
+ *         labels exact, terms when the meaning matches) and explains Tap vs
+ *         Click. UI candidates skip Spanish Contentful articles and segments,
+ *         and only keep bold text that comes right after Tap / Click /
+ *         Select (and similar), so section titles and emphasis stay out.
+ *         Candidates that are Spanish text are dropped. If an "In the app"
+ *         label no longer matches the term's Spanish, the glossary_extra row
+ *         gets needsReview = yes.
+ *         WARNING: don't run applyFinalGlossary() again, it reloads the
+ *         Nov 16 review and undoes later edits in glossary_extra.
  * v2.0.0: applyFinalGlossary() loads Jorge's full review (GlossaryData.gs,
  *         449 terms); Doc + Sheet with app labels, variations, do-not-use;
  *         new terms without English context get it auto-translated and
@@ -28,7 +38,7 @@
  *   glossaryDocCheck()           logs links, term count, triggers
  * ================================================================ */
 
-var GLOSSARY_DOC_VERSION = '2.0.0';
+var GLOSSARY_DOC_VERSION = '2.1.0';
 var GLOSSARY_DOC_FIXED_ID = '13Q6onYfCxvX6WxzefPAkS1oionvqWCdB5Q5HxPqRa7k';
 var GLOSSARY_DOC_TITLE = 'Thumbtack Spanish glossary (approved, updates automatically)';
 var GLOSSARY_DOC_PROP_ID = 'GLOSSARY_DOC_ID';
@@ -127,6 +137,7 @@ function updateGlossaryNow() {
   Logger.log('Glossary updated: ' + res.terms + ' terms.');
   Logger.log('Doc: ' + res.docUrl);
   Logger.log('Sheet: ' + res.sheetUrl);
+  if (res.staleApp) Logger.log('App labels to check (glossary_extra, needsReview = yes): ' + res.staleApp);
   if (res.autoTranslated) Logger.log('New terms with English context auto-translated (check glossary_extra, needsReview = yes): ' + res.autoTranslated);
   return res;
 }
@@ -159,6 +170,9 @@ function glossaryDocCheck() {
   Logger.log('Doc: https://docs.google.com/document/d/' + docId + '/edit');
   Logger.log('Sheet: ' + (sheetId ? 'https://docs.google.com/spreadsheets/d/' + sheetId + '/edit' : 'not created yet (run updateGlossaryNow)'));
   Logger.log('Approved terms: ' + glossaryDocReadTerms_().length);
+  var ex = glossaryReadExtra_().map, nr = [];
+  Object.keys(ex).forEach(function (k) { if (String(ex[k].needsReview).toLowerCase() === 'yes') nr.push(ex[k].en); });
+  Logger.log('glossary_extra rows to review (needsReview = yes): ' + (nr.length ? nr.join(', ') : 'none'));
   Logger.log('Daily trigger: ' + (handlers.indexOf('glossaryDocDaily') !== -1 ? 'installed' : 'NOT installed'));
   Logger.log('Weekly candidates trigger: ' + (handlers.indexOf('refreshUiCandidates') !== -1 ? 'installed' : 'NOT installed'));
 }
@@ -182,6 +196,7 @@ function glossaryReadExtra_() {
   for (var r = 0; r < vals.length; r++) {
     var o = {};
     for (var c = 0; c < GLOSSARY_EXTRA_COLUMNS.length; c++) o[GLOSSARY_EXTRA_COLUMNS[c]] = String(vals[r][c] || '');
+    o._row = r + 2;
     if (o.en) map[normalize_(o.en.trim())] = o;
   }
   return { sheet: sh, map: map };
@@ -197,6 +212,7 @@ function glossaryDocReadTerms_() {
   var iSt = C.indexOf('status'), iTy = C.indexOf('type');
   var extra = glossaryReadExtra_();
   var newExtra = [];
+  var staleRows = [];
   var seen = {};
   var terms = [];
   for (var r = 0; r < vals.length; r++) {
@@ -219,6 +235,13 @@ function glossaryDocReadTerms_() {
             variations: '', doNotUse: '', contextEn: cxEn, needsReview: 'yes' };
       newExtra.push([x.en, x.kind, x.app, x.variations, x.doNotUse, x.contextEn, x.needsReview]);
     }
+    // v2.1.0: flag an "In the app" label whose Spanish no longer matches the term
+    var appEs = String(x.app || '').match(/[\u201C"]([^\u201D"]+)[\u201D"]\s*\)?\s*$/);
+    if (x._row && appEs && normalize_(appEs[1].trim()) !== normalize_(es) &&
+        String(x.needsReview || '').toLowerCase() !== 'yes') {
+      staleRows.push(x._row);
+      x.needsReview = 'yes';
+    }
     var kind = x.kind || type;
     terms.push({
       kind: GLOSSARY_KIND_LABEL[kind] ? kind : type,
@@ -231,11 +254,17 @@ function glossaryDocReadTerms_() {
     if (sh2.getLastRow() === 0) sh2.appendRow(GLOSSARY_EXTRA_COLUMNS);
     sh2.getRange(sh2.getLastRow() + 1, 1, newExtra.length, GLOSSARY_EXTRA_COLUMNS.length).setValues(newExtra);
   }
+  if (staleRows.length && extra.sheet) {
+    var iNr = GLOSSARY_EXTRA_COLUMNS.indexOf('needsReview') + 1;
+    for (var sr = 0; sr < staleRows.length; sr++) extra.sheet.getRange(staleRows[sr], iNr).setValue('yes');
+    Logger.log('App labels that no longer match the Spanish (needsReview = yes): rows ' + staleRows.join(', '));
+  }
   var order = { product: 0, ui: 1, term: 2, category: 3 };
   terms.sort(function (a, b) {
     return (order[a.kind] - order[b.kind]) || a.en.toLowerCase().localeCompare(b.en.toLowerCase());
   });
   terms.autoTranslated = newExtra.length;
+  terms.staleApp = staleRows.length;
   return terms;
 }
 
@@ -243,7 +272,8 @@ function glossaryDocReadTerms_() {
 /* ---------------- Publishing ---------------- */
 
 var GLOSSARY_READ_ME = [
-  'Type: Product name = never translate, keep the English exactly, no quotes or parentheses. App label (UI) = a button, tab or menu in the app. Term = normal vocabulary. Service category = the name of a type of service.',
+  'Type: Product name = never translate, keep the English exactly, no quotes or parentheses. App label (UI) = a button, tab or menu in the app. Term = a word Thumbtack uses in a specific way. Service category = the name of a type of service.',
+  'How strict: Product names and App labels must be used exactly as written. Terms are not word for word: use the glossary Spanish when the word has the meaning shown in Context, and translate it normally when it means something else. Never use anything in Do not use.',
   'Spanish (normal word): use it when the word is part of a normal sentence. Example: Tiene 3 prospectos nuevos.',
   'In the app: use it exactly as written when the sentence tells someone to tap, click, open or go to that item. Example: Seleccione Leads (\u201CProspectos\u201D).',
   'Variations and when to use them: when one English word has more than one correct Spanish, this says which one to use in each case.',
@@ -251,7 +281,8 @@ var GLOSSARY_READ_ME = [
   'Words that are not in this glossary can be translated however reads best in context.',
   'Use "usted", never "t\u00FA". Write natural Spanish, not word for word. Don\'t add or remove information.',
   'Use sentence case in titles and labels (C\u00F3mo solicitar rese\u00F1as). Official program and policy names keep their capitals (Compromiso de Calidad, Comunidad de Thumbtack).',
-  'Mobile app steps: "Seleccione". Computer steps: "Haga clic en". No em dashes. No slang or regional expressions.'
+  'Steps: Tap X (touch screen) = "Seleccione X". Click X (computer) = "Haga clic en X". "Seleccione X" works for both, so "tap or click X" = "Seleccione X".',
+  'No em dashes. No slang or regional expressions.'
 ];
 var GLOSSARY_HEADER = ['Type', 'English', 'Spanish (normal word)', 'In the app (button, tab or menu)',
   'Variations and when to use them', 'Do not use', 'Context (English)', 'Context (Spanish)'];
@@ -264,7 +295,7 @@ function glossaryPublish_(force) {
   var props = PropertiesService.getScriptProperties();
   var doc = glossaryDocGet_();
   var sheet = glossarySheetGet_();
-  var res = { changed: false, terms: terms.length, docUrl: doc.getUrl(), sheetUrl: sheet.getUrl(), autoTranslated: terms.autoTranslated };
+  var res = { changed: false, terms: terms.length, docUrl: doc.getUrl(), sheetUrl: sheet.getUrl(), autoTranslated: terms.autoTranslated, staleApp: terms.staleApp };
   if (!force && props.getProperty(GLOSSARY_DOC_PROP_HASH) === hash) return res;
   glossaryWriteDoc_(doc, terms);
   glossaryWriteSheet_(sheet, terms);
@@ -427,6 +458,7 @@ function refreshUiCandidates() {
   function add(en, es, source, title) {
     en = String(en || '').replace(/\s+/g, ' ').trim().replace(/[.:,;]+$/, '');
     if (!en || en.length > 60 || en.split(' ').length > 7 || !/^[A-Z0-9+]/.test(en)) return;
+    if (glossaryLooksSpanish_(en)) return;
     var k = normalize_(en);
     if (known[k]) return;
     var f = found[k] || (found[k] = { en: en, es: {}, sources: {}, titles: {}, n: 0 });
@@ -464,7 +496,7 @@ function refreshUiCandidates() {
   // 2) Bold text in English Help Center articles (Contentful)
   var skipN = 0, total = 1, page = 0;
   while (skipN < total && page < 20) {
-    var url = GLOSSARY_CF_BASE + '/entries?content_type=helpCenterArticle&select=fields.slug,fields.title,fields.bodyText&include=2&limit=100&skip=' + skipN;
+    var url = GLOSSARY_CF_BASE + '/entries?content_type=helpCenterArticle&select=fields.slug,fields.title,fields.name,fields.bodyText&include=2&limit=100&skip=' + skipN;
     var resp = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + GLOSSARY_CF_TOKEN }, muteHttpExceptions: true });
     if (resp.getResponseCode() !== 200) { Logger.log('Contentful error ' + resp.getResponseCode() + ': ' + resp.getContentText().slice(0, 200)); break; }
     var data = JSON.parse(resp.getContentText());
@@ -476,8 +508,13 @@ function refreshUiCandidates() {
       var lang = langBySlug[slug] || '';
       if (lang && lang.indexOf('en') !== 0 && lang.indexOf('english') === -1) return;
       var title = (item.fields && item.fields.title) || slug;
+      var name = (item.fields && item.fields.name) || '';
+      // v2.1.0: Spanish articles that are not in the corpus yet
+      if (/\[spanish\]/i.test(name) || glossaryLooksSpanish_(title)) return;
       glossaryBoldRuns_(item.fields && item.fields.bodyText, inc, 0).forEach(function (b) {
-        add(b, '', 'English article (bold)', title);
+        // v2.1.0: only bold text right after Tap / Click / Select (and similar)
+        if (!GLOSSARY_UI_LEAD.test(b.before)) return;
+        add(b.text, '', 'English article (bold)', title);
       });
     });
     skipN += 100;
@@ -519,23 +556,42 @@ function refreshUiCandidates() {
   }
 }
 
+// Words that come right before a button, tab or menu in a step.
+var GLOSSARY_UI_LEAD = /\b(tap|click|select|choose|press|open|go to|toggle|turn on|turn off|check|uncheck|hit|enter)(\s+(on|the|your|a|an|into))*\s*["\u201C]?\s*$/i;
+
+// True when a piece of text reads as Spanish (accents, ¿ ¡, common Spanish words).
+function glossaryLooksSpanish_(t) {
+  t = String(t || '');
+  if (/[\u00E1\u00E9\u00ED\u00F3\u00FA\u00F1\u00BF\u00A1]/i.test(t)) return true;
+  if (/[a-z]ciones\b|[a-z]ci\u00F3n\b/i.test(t)) return true;
+  return /(^|\s)(o|y|de|del|la|las|el|los|en|su|sus|para|con|una|uno|por|que|nota|pagos|preguntas|frecuentes|precios)(\s|$)/i.test(t);
+}
+
 // Collects bold text runs (adjacent bold pieces joined) from a rich text node,
-// also inside embedded entries such as tips.
+// also inside embedded entries such as tips. Each run comes with the plain
+// text right before it ("before"), so callers can keep only real UI labels.
+// Embedded entries whose name ends in [Spanish] are skipped.
 function glossaryBoldRuns_(node, inc, depth) {
   var out = [];
   if (!node || depth > 6) return out;
-  var buf = '';
-  function flush() { if (buf.trim()) out.push(buf.trim()); buf = ''; }
+  var buf = '', before = '', plain = '';
+  function flush() { if (buf.trim()) out.push({ text: buf.trim(), before: before }); buf = ''; }
   (node.content || []).forEach(function (ch) {
     if (ch.nodeType === 'text') {
       var bold = (ch.marks || []).some(function (mk) { return mk.type === 'bold'; });
-      if (bold) buf += ch.value; else flush();
+      if (bold) {
+        if (!buf) before = plain.slice(-40);
+        buf += ch.value;
+      } else {
+        flush();
+        plain += ch.value;
+      }
     } else {
       flush();
       if (ch.nodeType === 'embedded-entry-block' || ch.nodeType === 'embedded-entry-inline') {
         var id = ch.data && ch.data.target && ch.data.target.sys && ch.data.target.sys.id;
         var e = id && inc[id];
-        if (e && e.fields) {
+        if (e && e.fields && !/\[spanish\]/i.test(String(e.fields.name || e.fields.internalName || ''))) {
           Object.keys(e.fields).forEach(function (fk) {
             var fv = e.fields[fk];
             if (fv && fv.nodeType === 'document') out = out.concat(glossaryBoldRuns_(fv, inc, depth + 1));
