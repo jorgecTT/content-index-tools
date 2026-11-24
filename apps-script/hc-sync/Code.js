@@ -1,5 +1,10 @@
 /**
- * HC Sync — Google Apps Script backend (v6.5.0)
+ * HC Sync — Google Apps Script backend (v6.6.0)
+ *
+ * v6.6.0: HIDDEN FROM SEARCH tag (same as HC Auto Sync v2.7.0).
+ *   - If the article has "Hide from search" checked in Contentful, the Doc
+ *     header starts with a bold orange line:
+ *     "Hidden from search: Yes (not in Help Center search, only by direct link)".
  *
  * v6.5.0: TABLES + HYPERLINKS.
  *   - Embedded "table" entries (fields.table.tableData) are now written as real
@@ -36,6 +41,8 @@ var KNOWN_REVIEWERS = ['Alex', 'Tiffany', 'Nathan', 'Nichole', 'Rachel'];
 var MAX_DESCRIPTION_CHARS = 24000;
 
 var HC_ARTICLE_BASE = 'https://help.thumbtack.com/article/';
+
+var HIDDEN_TAG_LINE = 'Hidden from search: Yes (not in Help Center search, only by direct link)';
 
 // Shared secret for the batch tool's doPost endpoint.
 var SHARED_SECRET = 'H3lpC3nt3r-VJOo8qkYF5gBPTCVwDXYmT979v2c7tW8';
@@ -94,10 +101,12 @@ function refreshArticle(formData) {
   var normalizedUrl = normalizeUrl(url);
   var lastModifiedStr = formatDateLong(article.latestContentUpdate);
 
+  var hidden = fields.unsearchable === true;
+
   if (mode === 'create') {
-    return createDoc(normalizedUrl, slug, title, publishDate, reviewer, lastModifiedStr, blocks, fields, article);
+    return createDoc(normalizedUrl, slug, title, publishDate, reviewer, lastModifiedStr, blocks, fields, article, hidden);
   }
-  return updateDoc(normalizedUrl, slug, oldUrl, title, publishDate, reviewer, lastModifiedStr, blocks);
+  return updateDoc(normalizedUrl, slug, oldUrl, title, publishDate, reviewer, lastModifiedStr, blocks, hidden);
 }
 
 
@@ -105,7 +114,7 @@ function refreshArticle(formData) {
 // MODE: UPDATE
 // ============================================================
 
-function updateDoc(normalizedUrl, slug, oldUrl, title, publishDate, reviewer, lastModifiedStr, blocks) {
+function updateDoc(normalizedUrl, slug, oldUrl, title, publishDate, reviewer, lastModifiedStr, blocks, hidden) {
   var searchUrl = (oldUrl && normalizeUrl(oldUrl)) ? normalizeUrl(oldUrl) : normalizedUrl;
 
   var match = findDocBySlugOrUrl(slug, searchUrl);
@@ -134,6 +143,7 @@ function updateDoc(normalizedUrl, slug, oldUrl, title, publishDate, reviewer, la
     'Previous refresh: ' + previousRefresh,
     'Last modified in source: ' + lastModifiedStr,
   ];
+  if (hidden) headerLines.unshift(HIDDEN_TAG_LINE);
 
   var doc = DocumentApp.openById(fileId);
   writeDocHeader(doc, headerLines);
@@ -165,7 +175,7 @@ function updateDoc(normalizedUrl, slug, oldUrl, title, publishDate, reviewer, la
 // MODE: CREATE
 // ============================================================
 
-function createDoc(normalizedUrl, slug, title, publishDate, reviewer, lastModifiedStr, blocks, fields, article) {
+function createDoc(normalizedUrl, slug, title, publishDate, reviewer, lastModifiedStr, blocks, fields, article, hidden) {
   var existing = findDocBySlugOrUrl(slug, normalizedUrl);
   if (existing.file) {
     throw new Error(JSON.stringify({
@@ -195,6 +205,7 @@ function createDoc(normalizedUrl, slug, title, publishDate, reviewer, lastModifi
     'Previous refresh: —',
     'Last modified in source: ' + lastModifiedStr,
   ];
+  if (hidden) headerLines.unshift(HIDDEN_TAG_LINE);
 
   var folder = DriveApp.getFolderById(FOLDER_ID);
   var newFile = DocumentApp.create(filename);
@@ -261,6 +272,13 @@ function styleHeader(para) {
   text.setFontFamily('Montserrat');
   text.setFontSize(9);
   text.setForegroundColor('#999999');
+  // v6.6.0: the hidden-from-search tag stands out (bold, orange).
+  if (para.getText().indexOf('Hidden from search:') === 0) {
+    text.setBold(true);
+    text.setForegroundColor('#B45309');
+  } else {
+    text.setBold(false);
+  }
 }
 
 

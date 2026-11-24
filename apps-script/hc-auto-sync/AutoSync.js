@@ -1,6 +1,27 @@
 /**
  * HC Auto Sync — AutoSync.gs  (CONSOLIDATED, single project)
- * v2.6.0
+ * v2.7.0
+ *
+ * v2.7.0 changes (NEW ARTICLES + HIDDEN FROM SEARCH):
+ *  - Every run (nightly and manual) first asks Contentful for ALL published
+ *    Help Center articles and adds any that are missing to the Articles tab.
+ *    The normal run then creates their Docs. Published articles only (the
+ *    Delivery API never returns drafts).
+ *  - Skipped on purpose: test articles ("test" in the slug or title), internal
+ *    pages in EXCLUDED_SLUGS, articles with no real text, and any slug or URL
+ *    listed in the "Excluded" tab (Jorge can add rows there, no code needed).
+ *    Deleting a row from Articles is NOT enough: discovery adds it back. Put
+ *    it in "Excluded" instead.
+ *  - New column F "Hidden from search" (Yes / blank) from the Contentful field
+ *    "unsearchable", filled for every article on every run.
+ *  - Docs of hidden articles get a tag as the first header line:
+ *    "Hidden from search: Yes (not in Help Center search, only by direct link)".
+ *    The tag is part of the content hash ONLY when the article is hidden, so
+ *    normal articles keep their hash (no mass rewrite). Hidden ones rewrite
+ *    once to get the tag, and again whenever the checkbox changes.
+ *  - The summary email lists the articles added that night and what was skipped.
+ *  - previewNewArticles(): run it from the editor to see what would be added,
+ *    without changing anything.
  *
  * v2.6.0 changes (TABLES + HYPERLINKS):
  *  - Embedded "table" entries (fields.table.tableData) are now written as real
@@ -43,6 +64,16 @@ var FOLDER_ID             = '1Eh0jaXmPFWx-YjntLh73xxdWni32IeqP';
 var SHEET_ID              = '1_Ei7R5-BgWBiYySa0dxNS-fYq3ppTj9jlbofMKLYVOM';
 var SHEET_TAB_ARTICLES    = 'Articles';
 var SHEET_TAB_HISTORY     = 'Run History';
+var SHEET_TAB_EXCLUDED    = 'Excluded';
+
+// Internal or junk pages that are never added to the content index.
+// (Test articles are skipped automatically; use the "Excluded" tab for the rest.)
+var EXCLUDED_SLUGS        = ['design-elements', 'test'];
+
+// An article needs at least this much text in its body to be added.
+var MIN_BODY_CHARS        = 40;
+
+var HIDDEN_TAG_LINE       = 'Hidden from search: Yes (not in Help Center search, only by direct link)';
 
 var CONTENTFUL_SPACE_ID   = 'zkjkphkd3oqx';
 var CONTENTFUL_ENV        = 'master';
@@ -95,7 +126,7 @@ function getArticleList() {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
 
-  var data    = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  var data    = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
   var results = [];
 
   data.forEach(function(row) {
@@ -113,6 +144,7 @@ function getArticleList() {
       lastUpdatedAt: (row[1] || '').toString().trim(),
       lastLog:       (row[2] || '').toString().trim(),
       docUrl:        fileId ? ('https://docs.google.com/document/d/' + fileId + '/edit') : '',
+      hidden:        (row[5] || '').toString().trim() === 'Yes',
     });
   });
 
@@ -204,7 +236,8 @@ function syncSingleArticle(url) {
     });
 
     var blocks = parseArticleToBlocks(article);
-    _setStoredHash(url, _computeContentHash(blocks));
+    _setStoredHash(url, _computeContentHash(blocks, _isHidden_(article)));
+    _setHiddenCell_(url, _isHidden_(article));
 
     _updateSheetRow(url, article.latestContentUpdate,
       getTodayDateInternal() + ' — synced manually');
@@ -272,6 +305,7 @@ function runManualSync() {
   _ensureTickTrigger();
 
   _initRunState(props, 'manual');
+  _runDiscoveryStep_(props);
 
   try {
     processBatch();
@@ -309,6 +343,7 @@ function runNightlySync() {
 
   _ensureTickTrigger();
   _initRunState(props, 'auto');
+  _runDiscoveryStep_(props);
   processBatch();
 }
 
@@ -326,6 +361,8 @@ function _initRunState(props, runType) {
     AS_BASELINE:         '[]',
     AS_RETIRED:          '[]',
     AS_MOVED:            '[]',
+    AS_ADDED:            '[]',
+    AS_SKIPPED:          '[]',
     AS_NO_CHANGE:        '0',
     AS_LAST_SLUG:        '',
     AS_BATCH_TRIGGER_ID: '',
@@ -403,7 +440,7 @@ function _processBatchInner() {
 
   var startRow  = checkpoint + 2;
   var batchRows = Math.min(BATCH_SIZE, totalDataRows - checkpoint);
-  var data      = sheet.getRange(startRow, 1, batchRows, 5).getValues();
+  var data      = sheet.getRange(startRow, 1, batchRows, 6).getValues();
 
   var runLabel   = Utilities.formatDate(new Date(), 'UTC', 'MMM d HH:mm') + ' UTC';
   var batchStart = Date.now();
@@ -492,12 +529,14 @@ function _processBatchInner() {
       continue;
     }
 
-    var article, blocks, hash, latestUpdatedAt;
+    var article, blocks, hash, latestUpdatedAt, hidden;
     try {
       article         = _articleFromCfData(cfData);
+      hidden          = _isHidden_(article);
       blocks          = parseArticleToBlocks(article);
-      hash            = _computeContentHash(blocks);
+      hash            = _computeContentHash(blocks, hidden);
       latestUpdatedAt = article.latestContentUpdate || '';
+      data[ri][5]     = hidden ? 'Yes' : '';
     } catch (he) {
       data[ri][2] = runLabel + ' — ERROR: parse/hash failed: ' + he.message;
       failed.push({ slug: sl, error: 'parse/hash: ' + he.message });
@@ -512,6 +551,13 @@ function _processBatchInner() {
         data[ri][1] = latestUpdatedAt;
         data[ri][2] = runLabel + ' — created';
         updated.push({ slug: sl, docUrl: cres.docUrl || '' });
+      } else if (cres.code === 'ALREADY_EXISTS' && hidden) {
+        // v2.7.0: Doc exists but has no tag yet — rewrite it so it gets one.
+        var hres = _doUpdateFromBlocks(u, sl, article, blocks);
+        data[ri][4] = hres.ok ? hash : '';
+        data[ri][1] = latestUpdatedAt;
+        data[ri][2] = runLabel + (hres.ok ? ' — baseline set (hidden tag added)' : ' — FAILED: ' + hres.error);
+        if (hres.ok) baseline.push(sl); else failed.push({ slug: sl, error: hres.error });
       } else if (cres.code === 'ALREADY_EXISTS') {
         data[ri][4] = hash;
         data[ri][1] = latestUpdatedAt;
@@ -547,9 +593,9 @@ function _processBatchInner() {
   }
 
   var abc  = data.map(function(r) { return [r[0], r[1], r[2]]; });  // A may change (moved)
-  var eCol = data.map(function(r) { return [r[4]]; });
+  var efCol = data.map(function(r) { return [r[4], r[5]]; });  // E = hash, F = hidden
   sheet.getRange(startRow, 1, batchRows, 3).setValues(abc);
-  sheet.getRange(startRow, 5, batchRows, 1).setValues(eCol);
+  sheet.getRange(startRow, 5, batchRows, 2).setValues(efCol);
 
   var newCheckpoint;
   if (rowsProcessed < requestMap.length && rowsProcessed > 0) {
@@ -599,7 +645,16 @@ function _articleFromCfData(cfData) {
 /**
  * SHA-256 over the RENDERED blocks, now including links and table rows.
  */
-function _computeContentHash(blocks) {
+function _isHidden_(article) {
+  var f = (article && article.item && article.item.fields) || {};
+  return f.unsearchable === true;
+}
+
+/**
+ * v2.7.0: when the article is hidden from search, a marker is added so the Doc
+ * is rewritten (and gets its tag). Not hidden = exactly the same hash as before.
+ */
+function _computeContentHash(blocks, hidden) {
   var sig = (blocks || []).map(function(b) {
     var parts = [b.type || '', b.text || ''];
     if (b.runs && b.runs.length) {
@@ -613,6 +668,7 @@ function _computeContentHash(blocks) {
     if (b.level != null)  parts.push('L' + b.level);
     return parts.join('\u00A7');
   }).join('\u00B6');
+  if (hidden) sig += '\u00B6HIDDEN';
 
   var bytes = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256, sig, Utilities.Charset.UTF_8);
@@ -631,7 +687,7 @@ function _doUpdateFromBlocks(url, slug, article, blocks) {
     var normUrl = normalizeUrl(url);
     var lastMod = formatDateLong(article.latestContentUpdate);
     var result  = updateDoc(normUrl, slug, '', title, getTodayDateInternal(),
-                            AUTO_REVIEWER, lastMod, blocks, url);
+                            AUTO_REVIEWER, lastMod, blocks, url, _isHidden_(article));
     return { ok: true, docUrl: result.docUrl || '' };
   } catch (e) {
     var msg = e.message || String(e);
@@ -648,7 +704,7 @@ function _doCreateFromBlocks(url, slug, article, blocks) {
     var normUrl = normalizeUrl(url);
     var lastMod = formatDateLong(article.latestContentUpdate);
     var result  = createDoc(normUrl, slug, title, getTodayDateInternal(),
-                            AUTO_REVIEWER, lastMod, blocks, fields, article);
+                            AUTO_REVIEWER, lastMod, blocks, fields, article, _isHidden_(article));
     return { ok: true, docUrl: result.docUrl || '' };
   } catch (e) {
     var msg = e.message || String(e);
@@ -674,6 +730,8 @@ function _finishRun(props, totalRows) {
   var baseline = JSON.parse(props.getProperty('AS_BASELINE') || '[]');
   var retired  = JSON.parse(props.getProperty('AS_RETIRED')  || '[]');
   var moved    = JSON.parse(props.getProperty('AS_MOVED')    || '[]');
+  var added    = JSON.parse(props.getProperty('AS_ADDED')    || '[]');
+  var skipped  = JSON.parse(props.getProperty('AS_SKIPPED')  || '[]');
   var noChange = parseInt(props.getProperty('AS_NO_CHANGE')  || '0', 10);
   var runDate  = props.getProperty('AS_RUN_DATE')            || 'Unknown';
   var runType  = props.getProperty('AS_RUN_TYPE')            || 'auto';
@@ -682,6 +740,10 @@ function _finishRun(props, totalRows) {
   var durationMin = startMs ? (Math.round((Date.now() - startMs) / 60000) + ' min') : 'unknown';
 
   var logLines = [];
+  if (added.length > 0) {
+    logLines.push('New articles added (' + added.length + '): ' +
+      added.map(function(a) { return a.slug + (a.hidden ? ' [hidden]' : ''); }).join(', '));
+  }
   if (updated.length > 0) {
     logLines.push('Updated (' + updated.length + '): ' +
       updated.map(function(x) { return x.slug; }).join(', '));
@@ -718,7 +780,7 @@ function _finishRun(props, totalRows) {
   props.setProperty('AS_CHECKPOINT', '-1');
   props.setProperty('AS_PHASE', 'done');
 
-  _sendSummaryEmail(updated, failed, baseline, noChange, totalRows, runDate, durationMin, runType, moved, retired);
+  _sendSummaryEmail(updated, failed, baseline, noChange, totalRows, runDate, durationMin, runType, moved, retired, added, skipped);
 
   Logger.log('Run finished. ' + updated.length + ' updated, ' + failed.length + ' failed.');
 }
@@ -779,9 +841,11 @@ function _deleteBatchTrigger(props) {
 // EMAILS
 // ============================================================
 
-function _sendSummaryEmail(updated, failed, baseline, noChange, totalRows, runDate, duration, runType, moved, retired) {
+function _sendSummaryEmail(updated, failed, baseline, noChange, totalRows, runDate, duration, runType, moved, retired, added, skipped) {
   moved   = moved   || [];
   retired = retired || [];
+  added   = added   || [];
+  skipped = skipped || [];
   try {
     var lines = [
       'HC Auto Sync — ' + (runType === 'auto' ? 'Nightly' : 'Manual') + ' Run',
@@ -790,6 +854,16 @@ function _sendSummaryEmail(updated, failed, baseline, noChange, totalRows, runDa
       'Duration: ' + duration,
       '',
     ];
+
+    if (added.length > 0) {
+      lines.push('NEW ARTICLES ADDED FROM CONTENTFUL (' + added.length + ') — Docs created in this run:');
+      added.forEach(function(a) {
+        lines.push('  • ' + a.slug + (a.hidden ? '  [hidden from search]' : '') + '  — ' + a.title);
+      });
+      lines.push('  If one of these should not be in the content index, add its slug to the');
+      lines.push('  "Excluded" tab and delete its row from the Articles tab (and its Doc).');
+      lines.push('');
+    }
 
     if (updated.length > 0) {
       lines.push('UPDATED (' + updated.length + '):');
@@ -821,8 +895,15 @@ function _sendSummaryEmail(updated, failed, baseline, noChange, totalRows, runDa
       lines.push('');
     }
     lines.push('NO CHANGES: ' + noChange + ' articles');
+    var realSkips = skipped.filter(function(x) { return x.reason !== 'in Excluded list'; });
+    if (realSkips.length > 0) {
+      lines.push('');
+      lines.push('NOT ADDED ON PURPOSE (' + realSkips.length + '):');
+      realSkips.forEach(function(x) { lines.push('  • ' + x.slug + '  -> ' + x.reason); });
+    }
 
-    var subject = 'HC Sync ' + runDate + ' — ' + updated.length + ' updated' +
+    var subject = 'HC Sync ' + runDate + ' — ' + (added.length ? added.length + ' new, ' : '') +
+      updated.length + ' updated' +
       (failed.length > 0 ? ', ' + failed.length + ' failed' : ', all good');
 
     MailApp.sendEmail({ to: NOTIFY_EMAIL, subject: subject, body: lines.join('\n') });
@@ -881,10 +962,10 @@ function refreshArticle(formData) {
 
   if (mode === 'create') {
     return createDoc(normalizedUrl, slug, title, publishDate, reviewer,
-                     lastModifiedStr, blocks, fields, article);
+                     lastModifiedStr, blocks, fields, article, _isHidden_(article));
   }
   return updateDoc(normalizedUrl, slug, oldUrl, title, publishDate,
-                   reviewer, lastModifiedStr, blocks, url);
+                   reviewer, lastModifiedStr, blocks, url, _isHidden_(article));
 }
 
 
@@ -966,6 +1047,161 @@ function _setStoredHash(url, hash) {
     var f = _findArticleRow_(url);
     if (f) f.sheet.getRange(f.row, 5).setValue(hash);
   } catch (e) { Logger.log('_setStoredHash error: ' + e.message); }
+}
+
+function _setHiddenCell_(url, hidden) {
+  try {
+    var f = _findArticleRow_(url);
+    if (f) f.sheet.getRange(f.row, 6).setValue(hidden ? 'Yes' : '');
+  } catch (e) { Logger.log('_setHiddenCell_ error: ' + e.message); }
+}
+
+
+// ============================================================
+// v2.7.0 — DISCOVER NEW ARTICLES IN CONTENTFUL
+// ============================================================
+
+/**
+ * Called at the start of every run. Never stops the run: if discovery fails,
+ * the run goes on with the rows that are already in the sheet.
+ */
+function _runDiscoveryStep_(props) {
+  try {
+    var res = discoverNewArticles_(false);
+    props.setProperties({
+      AS_ADDED:   JSON.stringify(res.added),
+      AS_SKIPPED: JSON.stringify(res.skipped),
+    });
+    Logger.log('Discovery: ' + res.added.length + ' added, ' + res.skipped.length + ' skipped.');
+  } catch (e) {
+    Logger.log('Discovery failed (run continues): ' + e.message);
+    props.setProperty('AS_SKIPPED', JSON.stringify([{ slug: '(discovery)', reason: 'ERROR: ' + e.message }]));
+  }
+}
+
+/**
+ * Run this from the editor to SEE what would be added. Changes nothing.
+ */
+function previewNewArticles() {
+  var res = discoverNewArticles_(true);
+  Logger.log('Would ADD (' + res.added.length + '):');
+  res.added.forEach(function(a) {
+    Logger.log('  ' + a.slug + (a.hidden ? '  [hidden]' : '') + '  | ' + a.title);
+  });
+  Logger.log('Would SKIP (' + res.skipped.length + '):');
+  res.skipped.forEach(function(s) { Logger.log('  ' + s.slug + '  -> ' + s.reason); });
+}
+
+/**
+ * Lists every published helpCenterArticle in Contentful and appends the ones
+ * the Articles tab does not have yet. dryRun = true only reports.
+ * Returns { added: [{slug,title,hidden}], skipped: [{slug,reason}] }.
+ */
+function discoverNewArticles_(dryRun) {
+  var ss    = SpreadsheetApp.openById(SHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_TAB_ARTICLES);
+  if (!sheet) throw new Error('Articles tab not found');
+
+  if (!dryRun) _ensureDiscoverySetup_(ss, sheet);
+
+  // Slugs already in the sheet (lowercase, so case differences don't duplicate).
+  var have    = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    sheet.getRange(2, 1, lastRow - 1, 1).getValues().forEach(function(r) {
+      var s = extractSlugFromUrl((r[0] || '').toString().trim());
+      if (s) have[s.toLowerCase()] = true;
+    });
+  }
+
+  var excluded = _readExcludedSlugs_(ss);
+  EXCLUDED_SLUGS.forEach(function(s) { excluded[s.toLowerCase()] = true; });
+
+  var entries = _listAllPublishedArticles_();
+  var added = [], skipped = [], newRows = [];
+  var seenNow = {};
+
+  entries.forEach(function(item) {
+    var f     = item.fields || {};
+    var slug  = (f.slug || '').toString().trim();
+    var title = (f.title || '').toString().trim();
+    if (!slug) return;
+    var key = slug.toLowerCase();
+    if (have[key] || seenNow[key]) return;
+    seenNow[key] = true;
+
+    if (excluded[key])                { skipped.push({ slug: slug, reason: 'in Excluded list' }); return; }
+    if (_looksLikeTest_(slug, title)) { skipped.push({ slug: slug, reason: 'test article' }); return; }
+    var bodyLen = extractBodySample(f.bodyText || {}, 2000).replace(/\s+/g, ' ').trim().length;
+    if (bodyLen < MIN_BODY_CHARS)     { skipped.push({ slug: slug, reason: 'no real content' }); return; }
+
+    var hidden = f.unsearchable === true;
+    added.push({ slug: slug, title: title, hidden: hidden });
+    // A=URL B=updatedAt C=log D=fileId E=hash (empty = Doc gets created) F=hidden
+    newRows.push([HC_ARTICLE_BASE + slug, '', 'Added by discovery — Doc pending', '', '',
+                  hidden ? 'Yes' : '']);
+  });
+
+  if (!dryRun && newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, 6).setValues(newRows);
+  }
+  return { added: added, skipped: skipped };
+}
+
+function _listAllPublishedArticles_() {
+  var all = [], skip = 0, limit = 200, total = null;
+  var select = 'sys.id,fields.slug,fields.title,fields.unsearchable,fields.bodyText';
+  while (total === null || skip < total) {
+    var qs = 'content_type=helpCenterArticle&select=' + encodeURIComponent(select) +
+             '&limit=' + limit + '&skip=' + skip + '&order=sys.createdAt';
+    var res = UrlFetchApp.fetch(CONTENTFUL_BASE + '/entries?' + qs, {
+      headers: { 'Authorization': 'Bearer ' + CONTENTFUL_TOKEN },
+      muteHttpExceptions: true,
+    });
+    if (res.getResponseCode() !== 200) {
+      throw new Error('Contentful list HTTP ' + res.getResponseCode() + ': ' +
+                      res.getContentText().slice(0, 200));
+    }
+    var data = JSON.parse(res.getContentText());
+    total = data.total || 0;
+    all = all.concat(data.items || []);
+    skip += limit;
+    if (!data.items || data.items.length === 0) break;
+  }
+  return all;
+}
+
+function _looksLikeTest_(slug, title) {
+  var tokens = (slug || '').toLowerCase().split(/[-_]+/);
+  if (tokens.indexOf('test') !== -1) return true;
+  return /\btest\b/i.test(title || '');
+}
+
+function _readExcludedSlugs_(ss) {
+  var out = {};
+  var tab = ss.getSheetByName(SHEET_TAB_EXCLUDED);
+  if (!tab || tab.getLastRow() < 2) return out;
+  tab.getRange(2, 1, tab.getLastRow() - 1, 1).getValues().forEach(function(r) {
+    var v = (r[0] || '').toString().trim();
+    if (!v) return;
+    var s = extractSlugFromUrl(v) || v;
+    out[s.toLowerCase()] = true;
+  });
+  return out;
+}
+
+/** Column F title + the Excluded tab. Safe to run any number of times. */
+function _ensureDiscoverySetup_(ss, sheet) {
+  if (!sheet.getRange(1, 6).getValue()) sheet.getRange(1, 6).setValue('Hidden from search');
+  var tab = ss.getSheetByName(SHEET_TAB_EXCLUDED);
+  if (!tab) {
+    tab = ss.insertSheet(SHEET_TAB_EXCLUDED);
+    tab.getRange(1, 1, 1, 2).setValues([['Slug or URL', 'Why it is excluded']]);
+    tab.getRange(1, 1, 1, 2).setFontWeight('bold');
+    tab.setFrozenRows(1);
+    tab.setColumnWidth(1, 420);
+    tab.setColumnWidth(2, 360);
+  }
 }
 
 function _openCachedDocFile(fileId) {
@@ -1054,7 +1290,7 @@ function _jsonResponse(obj) {
 // ============================================================
 
 function updateDoc(normalizedUrl, slug, oldUrl, title, publishDate,
-                   reviewer, lastModifiedStr, blocks, originalUrl) {
+                   reviewer, lastModifiedStr, blocks, originalUrl, hidden) {
   var file      = null;
   var matchedBy = '';
 
@@ -1099,6 +1335,7 @@ function updateDoc(normalizedUrl, slug, oldUrl, title, publishDate,
     'Previous refresh: '        + previousRefresh,
     'Last modified in source: ' + lastModifiedStr,
   ];
+  if (hidden) headerLines.unshift(HIDDEN_TAG_LINE);
 
   var doc = DocumentApp.openById(fileId);
   writeDocHeader(doc, headerLines);
@@ -1146,7 +1383,7 @@ function _renamedFilenameForTitle_(currentName, newTitle) {
 // ============================================================
 
 function createDoc(normalizedUrl, slug, title, publishDate, reviewer,
-                   lastModifiedStr, blocks, fields, article) {
+                   lastModifiedStr, blocks, fields, article, hidden) {
   var existing = findDocBySlugOrUrl(slug, normalizedUrl);
   if (existing.file) {
     throw new Error(JSON.stringify({
@@ -1176,6 +1413,7 @@ function createDoc(normalizedUrl, slug, title, publishDate, reviewer,
     'Previous refresh: —',
     'Last modified in source: ' + lastModifiedStr,
   ];
+  if (hidden) headerLines.unshift(HIDDEN_TAG_LINE);
 
   var folder    = DriveApp.getFolderById(FOLDER_ID);
   var newFile   = DocumentApp.create(filename);
@@ -1242,6 +1480,13 @@ function styleHeader(para) {
   text.setFontFamily('Montserrat');
   text.setFontSize(9);
   text.setForegroundColor('#999999');
+  // v2.7.0: the hidden-from-search tag stands out (bold, orange).
+  if (para.getText().indexOf('Hidden from search:') === 0) {
+    text.setBold(true);
+    text.setForegroundColor('#B45309');
+  } else {
+    text.setBold(false);
+  }
 }
 
 
